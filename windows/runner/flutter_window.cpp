@@ -18,6 +18,7 @@
 #include "drag_preview_window.h"
 #include "phantom_mouse_button_filter.h"
 #include "shift_key_normalizer.h"
+#include "snap_layouts_button.h"
 #include "splash_window.h"
 #include "hang_monitor.h"
 #include "startup_watchdog.h"
@@ -539,6 +540,7 @@ bool FlutterWindow::OnCreate() {
     return false;
   }
   RegisterPlugins(flutter_controller_->engine());
+  snap_layouts::Initialize(flutter_controller_->engine()->messenger());
   // ערוץ החלונות: סגירה והעלאה של הראשי, גרירת כרטיסיות ועזרים לחלונות Dart.
   multiwindow_channel_ =
       std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
@@ -971,6 +973,7 @@ void FlutterWindow::OnDestroy() {
   }
 
   splash_channel_.reset();
+  snap_layouts::Shutdown();
   multiwindow_channel_.reset();
   process_control_channel_.reset();
   if (flutter_controller_) {

@@ -2,9 +2,11 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:otzaria/core/windowing/app_drag_to_move_area.dart';
+import 'package:otzaria/core/windowing/app_virtual_window_frame.dart';
 import 'package:otzaria/core/windowing/app_window_controller.dart';
 import 'package:otzaria/core/windowing/app_window_scope.dart';
 import 'package:otzaria/core/windowing/caption_button_colors.dart';
+import 'package:otzaria/core/windowing/snap_layouts_max_button.dart';
 import 'package:otzaria/core/windowing/window_caption_hit_test.dart';
 import 'package:otzaria/theme/app_tokens.dart';
 import 'package:window_manager/window_manager.dart' show WindowCaptionButton;
@@ -107,20 +109,25 @@ class _AppWindowCaptionState extends State<AppWindowCaption> {
     AppWindowController window,
     AppWindowCaptionTooltips tips,
   ) {
-    if (_isMaximized) {
-      return _tip(
-        tips.restore,
-        WindowCaptionButton.unmaximize(
-          brightness: widget.brightness,
-          onPressed: window.unmaximize,
-        ),
-      );
-    }
+    final onPressed = _isMaximized ? window.unmaximize : window.maximize;
     return _tip(
-      tips.maximize,
-      WindowCaptionButton.maximize(
-        brightness: widget.brightness,
-        onPressed: window.maximize,
+      _isMaximized ? tips.restore : tips.maximize,
+      SnapLayoutsMaxButton(
+        onPressed: onPressed,
+        topInset: _isMaximized ? 0 : AppVirtualWindowFrame.edgeSize,
+        builder: (context, hovered, pressed) => _isMaximized
+            ? WindowCaptionButton.unmaximize(
+                brightness: widget.brightness,
+                onPressed: onPressed,
+                hovered: hovered,
+                pressed: pressed,
+              )
+            : WindowCaptionButton.maximize(
+                brightness: widget.brightness,
+                onPressed: onPressed,
+                hovered: hovered,
+                pressed: pressed,
+              ),
       ),
     );
   }
