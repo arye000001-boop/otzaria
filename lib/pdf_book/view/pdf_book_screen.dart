@@ -1129,11 +1129,6 @@ class _PdfBookScreenState extends State<PdfBookScreen>
       });
     }
 
-    // לשונית החיפוש האוטומטית ממוקדת רק ב-didChangeDependencies.
-    if (!_searchTabAutoSelected) {
-      _navigationFieldFocusNode.requestFocus();
-    }
-
     // הגדרת listeners עם שמות לצורך הסרה נכונה ב-dispose
     _leftPaneTabControllerListener = () {
       // בחירה של המשתמש — מכאן והלאה השדה רשאי למקד את עצמו.
@@ -1143,13 +1138,9 @@ class _PdfBookScreenState extends State<PdfBookScreen>
         setState(() {
           _currentLeftPaneTabIndex = _leftPaneTabController!.index;
         });
-        if (_leftPaneTabController!.index == 1 &&
-            widget.tab.showLeftPane.value) {
-          _searchFieldFocusNode.requestFocus();
-        } else if (_leftPaneTabController!.index == 0 &&
-            widget.tab.showLeftPane.value) {
-          _navigationFieldFocusNode.requestFocus();
-        } else if (!widget.tab.showLeftPane.value) {
+        if (widget.tab.showLeftPane.value) {
+          _focusActiveLeftPaneSearchField();
+        } else {
           // אם חלונית הצד סגורה, החזר focus ל-PDF
           _pdfViewFocusNode.requestFocus();
         }
@@ -1163,11 +1154,7 @@ class _PdfBookScreenState extends State<PdfBookScreen>
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
         if (widget.tab.showLeftPane.value) {
-          if (_leftPaneTabController!.index == 1) {
-            _searchFieldFocusNode.requestFocus();
-          } else if (_leftPaneTabController!.index == 0) {
-            _navigationFieldFocusNode.requestFocus();
-          }
+          _focusActiveLeftPaneSearchField();
         } else {
           _pdfViewFocusNode.requestFocus();
         }
@@ -1220,7 +1207,7 @@ class _PdfBookScreenState extends State<PdfBookScreen>
     });
   }
 
-  /// ממקד לשונית חיפוש אוטומטית רק בחלונית פתוחה ובמסך רחב.
+  /// ממקד שדה ראשוני רק בחלונית פתוחה ובמסך רחב.
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
@@ -1233,9 +1220,21 @@ class _PdfBookScreenState extends State<PdfBookScreen>
       return;
     }
     _searchHost.activeTab = _leftPaneTabController!.index;
-    if (_searchTabAutoSelected &&
-        isFirstResolution &&
-        widget.tab.showLeftPane.value) {
+    if (isFirstResolution && NavPanelSearch.isWide(context)) {
+      _focusActiveLeftPaneSearchField();
+    }
+  }
+
+  void _focusActiveLeftPaneSearchField() {
+    if (!widget.tab.showLeftPane.value ||
+        !TickerMode.valuesOf(context).enabled ||
+        !_isActivePane(context.read<TabsBloc>().state) ||
+        ModalRoute.of(context)?.isCurrent == false) {
+      return;
+    }
+    if (_leftPaneTabController!.index == 0 && NavPanelSearch.isWide(context)) {
+      _navigationFieldFocusNode.requestFocus();
+    } else if (_leftPaneTabController!.index == 1) {
       _searchFieldFocusNode.requestFocus();
     }
   }
@@ -4782,11 +4781,14 @@ class _PdfBookScreenState extends State<PdfBookScreen>
                           );
                         }
                       },
-                      paneContent: ExcludeFocus(
-                        excluding: !showLeftPane,
-                        child: TickerMode(
-                          enabled: showLeftPane,
-                          child: _buildLeftPaneContent(showLeftPane),
+                      paneContent: BlocSelector<TabsBloc, TabsState, bool>(
+                        selector: _isActivePane,
+                        builder: (context, isActivePane) => ExcludeFocus(
+                          excluding: !showLeftPane || !isActivePane,
+                          child: TickerMode(
+                            enabled: showLeftPane,
+                            child: _buildLeftPaneContent(showLeftPane),
+                          ),
                         ),
                       ),
                       mainContent: AdaptiveSidePane(
