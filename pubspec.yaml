@@ -141,13 +141,14 @@ dependencies:
   # הפורק מסנן הודעות חלון לפי HWND, כדי שמצב החלון הראשי לא יחול על חלונות
   # נוספים, ומקבע את קצוות שינוי הגודל לפי המסך תחת RTL (#3187). ב-master של
   # upstream הקוד הזה הוסר (שכתוב לקראת 0.6.0, שטרם שוחרר).
-  # הענף otzaria/0.5.2-snap-layouts מוסיף hovered/pressed לכפתורי הכותרת (#4021),
+  # הענף otzaria/0.5.2-snap-layouts מוסיף hovered/pressed לכפתורי הכותרת (#4021)
+  # ואת תיקוני הציור, הריחוף וה-disabled שלהם מ-main של הפורק,
   # ב-upstream: leanflutter/window_manager#608.
   # TODO: לחזור לגרסה הרשמית מ-pub.dev אחרי שחרור 0.6.0 (תמיכה בריבוי חלונות).
   window_manager:
     git:
       url: https://github.com/Otzaria/window_manager
-      ref: c4f6d3c4a2cee16cf7e766f84ce8b9c5b07e60e9
+      ref: 181407ed09f1ec98dc6cd47086a4a34b8a38da5a
       path: packages/window_manager
   screen_retriever: ^0.2.2
   # TODO: לחזור ל-pub.dev אחרי מיזוג ושחרור ubuntu-flutter-community/flutter_spinbox#102–#114.
