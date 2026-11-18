@@ -15,6 +15,7 @@ import 'package:otzaria/tools/calendar/dialogs/jump_to_date_dialog.dart';
 import 'package:otzaria/tools/calendar/widgets/calendar_date_picker_panel.dart';
 import 'package:otzaria/settings/widgets/settings_widgets_exports.dart';
 import 'package:otzaria/theme/app_tokens.dart';
+import 'package:otzaria/widgets/text/app_section_label.dart';
 import 'package:otzaria/theme/calendar_event_colors.dart';
 import 'package:otzaria/widgets/dialogs/dialogs_exports.dart';
 import 'package:otzaria/widgets/misc/app_menu_exports.dart';
@@ -76,6 +77,7 @@ class CalendarEventDialogResult {
   final String description;
   final DateTime selectedDate;
   final RecurrenceType recurrenceType;
+  final List<int>? weeklyDays;
   final int? recurringYears;
   final TimeOfDay? eventTime;
   final TimeOfDay? endTime;
@@ -89,6 +91,7 @@ class CalendarEventDialogResult {
     required this.description,
     required this.selectedDate,
     required this.recurrenceType,
+    this.weeklyDays,
     required this.recurringYears,
     required this.eventTime,
     required this.endTime,
@@ -138,6 +141,8 @@ class _CalendarEventDialogState extends State<CalendarEventDialog> {
 
   late bool _recurForever;
   late RecurrenceType _selectedRecurrenceType;
+  late Set<int> _weeklyDays;
+  late bool _weeklyDaysCustomized;
   TimeOfDay? _selectedTime;
   TimeOfDay? _selectedEndTime;
   late int _notificationMinutes;
@@ -146,6 +151,9 @@ class _CalendarEventDialogState extends State<CalendarEventDialog> {
   DateTime? _selectedEndDate;
   int? _selectedColorIndex;
   bool _colorChanged = false;
+
+  /// הערכים בפתיחה: יציאה כשהם השתנו שואלת לפני הסגירה (DD-08).
+  late final Object _initialValues;
 
   @override
   void initState() {
@@ -164,6 +172,8 @@ class _CalendarEventDialogState extends State<CalendarEventDialog> {
     _selectedJewishDate = JewishDate.fromDateTime(_selectedDate);
 
     _selectedRecurrenceType = ev?.recurrenceType ?? RecurrenceType.none;
+    _weeklyDays = (ev?.weeklyDays ?? [_selectedDate.weekday]).toSet();
+    _weeklyDaysCustomized = ev?.weeklyDays != null;
     _recurForever = ev?.recurringYears == null;
     _selectedTime = ev?.eventTime;
     _selectedEndTime = ev?.endTime;
@@ -185,6 +195,29 @@ class _CalendarEventDialogState extends State<CalendarEventDialog> {
     _notificationMinutes =
         ev?.notificationMinutes ?? _smartDefaultNotification();
     _userOverrodeNotification = ev?.notificationMinutes != null;
+    _initialValues = _currentValues();
+  }
+
+  Object _currentValues() => (
+    _titleController.text,
+    _descriptionController.text,
+    _yearsController.text,
+    _selectedDate,
+    _selectedRecurrenceType,
+    _recurForever,
+    _selectedTime,
+    _selectedEndTime,
+    _notificationMinutes,
+    _selectedEndDate,
+    _selectedColorIndex,
+  );
+
+  Future<void> _requestDismiss() async {
+    if (_currentValues() != _initialValues &&
+        await confirmDiscardChanges(context) != true) {
+      return;
+    }
+    if (mounted) Navigator.of(context).pop();
   }
 
   @override
@@ -290,6 +323,7 @@ class _CalendarEventDialogState extends State<CalendarEventDialog> {
     setState(() {
       _selectedDate = date;
       _selectedJewishDate = JewishDate.fromDateTime(date);
+      if (!_weeklyDaysCustomized) _weeklyDays = {date.weekday};
       if (!_userOverrodeNotification) {
         _notificationMinutes = _smartDefaultNotification();
       }
@@ -671,6 +705,9 @@ class _CalendarEventDialogState extends State<CalendarEventDialog> {
         description: _descriptionController.text.trim(),
         selectedDate: _selectedDate,
         recurrenceType: _selectedRecurrenceType,
+        weeklyDays: _selectedRecurrenceType == RecurrenceType.weekly
+            ? (_weeklyDays.toList()..sort())
+            : null,
         recurringYears: recurringYears,
         eventTime: _selectedTime,
         endTime: _selectedEndTime,
@@ -1021,10 +1058,11 @@ class _CalendarEventDialogState extends State<CalendarEventDialog> {
           : FluentIcons.calendar_add_24_regular,
       onConfirm: _submit,
       handleEnterKey: true,
+      onDismissRequest: _requestDismiss,
       actions: [
         ActionButton.neutral(
           text: 'ביטול',
-          onPressed: () => Navigator.of(context).pop(),
+          onPressed: () => Navigator.of(context).maybePop(),
         ),
         ActionButton.recommended(
           text: isEditMode ? 'שמור שינויים' : 'צור',
@@ -1154,6 +1192,52 @@ class _CalendarEventDialogState extends State<CalendarEventDialog> {
                   if (value != null) _onRecurrenceTypeChanged(value);
                 },
               ),
+              if (_selectedRecurrenceType == RecurrenceType.weekly)
+                Padding(
+                  padding: const EdgeInsetsDirectional.symmetric(
+                    horizontal: AppTokens.spaceMD,
+                    vertical: AppTokens.spaceSM,
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const AppSectionLabel('ימי חזרה בשבוע'),
+                      const SizedBox(height: AppTokens.spaceSM),
+                      Wrap(
+                        spacing: AppTokens.spaceSM,
+                        runSpacing: AppTokens.spaceXS,
+                        children: [
+                          for (final (day, label) in const <(int, String)>[
+                            (DateTime.sunday, 'א׳'),
+                            (DateTime.monday, 'ב׳'),
+                            (DateTime.tuesday, 'ג׳'),
+                            (DateTime.wednesday, 'ד׳'),
+                            (DateTime.thursday, 'ה׳'),
+                            (DateTime.friday, 'ו׳'),
+                            (DateTime.saturday, 'ש׳'),
+                          ])
+                            FilterChip(
+                              label: Text(label),
+                              selected: _weeklyDays.contains(day),
+                              onSelected: (selected) {
+                                if (!selected && _weeklyDays.length == 1) {
+                                  return;
+                                }
+                                setState(() {
+                                  _weeklyDaysCustomized = true;
+                                  if (selected) {
+                                    _weeklyDays.add(day);
+                                  } else {
+                                    _weeklyDays.remove(day);
+                                  }
+                                });
+                              },
+                            ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
               if (isRecurring) ...[
                 CheckboxListTile(
                   title: const Text('חזרה ללא הגבלה (תמיד)'),

@@ -59,6 +59,7 @@ export 'package:otzaria/book_common/utils/commentary_search_utils.dart'
 import 'package:otzaria/book_common/utils/category_settings_utils.dart';
 import 'package:otzaria/book_common/utils/commentary_plugin_menu_entries.dart';
 import 'package:otzaria/text_book/utils/commentary_title_visibility.dart';
+import 'package:otzaria/text_book/utils/link_processing.dart';
 import 'package:otzaria/book_common/utils/commentary_type_filter.dart';
 import 'package:otzaria/book_common/utils/commentator_group_builder.dart';
 import 'package:otzaria/book_common/utils/link_anchor_markers.dart';
@@ -68,6 +69,7 @@ import 'package:otzaria/widgets/layout/commentators_filter_screen.dart';
 import 'package:otzaria/widgets/lists/commentators_selection_panel.dart';
 import 'package:otzaria/widgets/feedback/otzaria_empty_state.dart';
 import 'package:otzaria/widgets/misc/progressive_scrolling.dart';
+import 'package:otzaria/widgets/misc/edge_drag_handoff.dart';
 import 'package:otzaria/widgets/misc/smooth_wheel_scroll.dart';
 import 'package:otzaria/settings/services/per_book_settings_service.dart';
 import 'package:otzaria/settings/settings_exports.dart';
@@ -239,6 +241,9 @@ class CommentaryListBase extends StatefulWidget {
   /// false כשהחלונית שמכילה את הרשימה סגורה אך נשארת בעץ.
   final bool isPaneOpen;
 
+  /// גרירה שמתחילה בקצה הרשימה גוללת את הרשימה שמעליה (כרטיס בתוך הספר).
+  final bool handOffEdgeDragsToParent;
+
   const CommentaryListBase({
     super.key,
     required this.openBookCallback,
@@ -273,6 +278,7 @@ class CommentaryListBase extends StatefulWidget {
     this.contentMaxWidth,
     this.scrollTargetListenable,
     this.isPaneOpen = true,
+    this.handOffEdgeDragsToParent = false,
   });
 
   @override
@@ -347,6 +353,7 @@ class CommentaryListBaseState extends State<CommentaryListBase>
 
   ({
     List<Link> links,
+    Map<int, List<Link>> linksByLine,
     List<int> indexes,
     List<String> commentators,
     Set<String> types,
@@ -462,30 +469,32 @@ class CommentaryListBaseState extends State<CommentaryListBase>
         .join('||');
   }
 
-  // getLinksforIndexs סורק את כל קישורי הספר; future חדש גם גורם לבנייה נוספת
-  // כשהוא נפתר, ולכן נוצר מחדש רק כשהקלטים משתנים.
+  // future חדש גורם לבנייה נוספת כשהוא נפתר, ולכן נוצר רק כשהקלטים משתנים.
   Future<List<Link>> _getCachedLinks(
     List<int> indexes,
-    List<Link> links,
+    TextBookLoaded state,
     List<String> commentators,
     Set<String> types,
   ) {
     final cached = _cachedLinks;
     if (cached != null &&
-        identical(cached.links, links) &&
+        identical(cached.links, state.links) &&
+        identical(cached.linksByLine, state.linksByLine) &&
         listEquals(cached.indexes, indexes) &&
         listEquals(cached.commentators, commentators) &&
         setEquals(cached.types, types)) {
       return cached.future;
     }
-    final future = getLinksforIndexs(
+    final future = getCommentaryLinksForLines(
       indexes: indexes,
-      links: links,
+      links: state.links,
+      linksByLine: state.linksByLine,
       commentatorsToShow: commentators,
       typesToShow: types,
     );
     _cachedLinks = (
-      links: links,
+      links: state.links,
+      linksByLine: state.linksByLine,
       indexes: indexes,
       commentators: commentators,
       types: types,
@@ -854,9 +863,10 @@ class CommentaryListBaseState extends State<CommentaryListBase>
                     : 0),
           ];
 
-    final links = await getLinksforIndexs(
+    final links = await getCommentaryLinksForLines(
       indexes: indexes,
       links: blocState.links,
+      linksByLine: blocState.linksByLine,
       commentatorsToShow: selectedCommentators,
     );
     if (links.isEmpty) {
@@ -1799,6 +1809,7 @@ class CommentaryListBaseState extends State<CommentaryListBase>
               previous.availableCommentators,
               current.availableCommentators,
             ) ||
+            previous.commentatorsLoaded != current.commentatorsLoaded ||
             previous.links != current.links || // השוואת רפרנס לביצועים
             // שורות קבועות (מפרש מתחת לשורה) אינן תלויות בגלילה.
             (widget.indexes == null &&
@@ -1892,7 +1903,12 @@ class CommentaryListBaseState extends State<CommentaryListBase>
           return Builder(
             builder: (context) {
               // כשמשתמשים ב-availableCommentators, ממתינים שהם ייטענו
+              final noCommentatorsAtAll =
+                  widget.useAvailableCommentators &&
+                  state.commentatorsLoaded &&
+                  state.availableCommentators.isEmpty;
               if (widget.useAvailableCommentators &&
+                  !state.commentatorsLoaded &&
                   state.availableCommentators.isEmpty) {
                 return const Center(child: CircularProgressIndicator());
               }
@@ -1962,7 +1978,7 @@ class CommentaryListBaseState extends State<CommentaryListBase>
               if (!hasRelevantLinks) {
                 _orderedLinks = [];
                 _scheduleSearchCompute();
-                if (state.linksLoading) {
+                if (state.linksLoading && !noCommentatorsAtAll) {
                   return Center(
                     child: Padding(
                       padding: const EdgeInsets.all(16.0),
@@ -2002,7 +2018,9 @@ class CommentaryListBaseState extends State<CommentaryListBase>
                 return OtzariaEmptyState(
                   isCompact: true,
                   icon: OtzariaIcons.links_24_regular,
-                  title: hasAnyCommentaryLinks
+                  title: noCommentatorsAtAll
+                      ? 'אין מפרשים לספר זה'
+                      : hasAnyCommentaryLinks
                       ? 'לא נמצאו מפרשים מהנבחרים לקטע זה'
                       : 'לא נמצאו מפרשים לקטע הנבחר',
                 );
@@ -2011,7 +2029,7 @@ class CommentaryListBaseState extends State<CommentaryListBase>
               final commentaryWidget = FutureBuilder<List<Link>>(
                 future: _getCachedLinks(
                   currentIndexes,
-                  state.links,
+                  state,
                   selectedCommentators,
                   effectiveTypes,
                 ),
@@ -2129,7 +2147,9 @@ class CommentaryListBaseState extends State<CommentaryListBase>
                             _schedulePendingCommentatorScroll();
                           }
 
-                          final listView = ScrollablePositionedList.builder(
+                          Widget buildList(
+                            ScrollPhysics physics,
+                          ) => ScrollablePositionedList.builder(
                             itemScrollController: _itemScrollController,
                             itemPositionsListener: _itemPositionsListener,
                             listController: _listController,
@@ -2142,7 +2162,7 @@ class CommentaryListBaseState extends State<CommentaryListBase>
                                     0,
                                     flatItems.length - 1,
                                   ),
-                            physics: const ClampingScrollPhysics(),
+                            physics: physics,
                             shrinkWrap: widget.shrinkWrap,
                             itemCount: flatItems.length,
                             itemBuilder: (context, index) {
@@ -2165,6 +2185,11 @@ class CommentaryListBaseState extends State<CommentaryListBase>
                               );
                             },
                           );
+                          final listView = widget.handOffEdgeDragsToParent
+                              ? EdgeDragHandoff(
+                                  builder: (_, physics) => buildList(physics),
+                                )
+                              : buildList(const ClampingScrollPhysics());
 
                           // ProgressiveScroll עוטף את SelectionArea (מעליו),
                           // כך שגלילת החיצים נקלטת גם כש-SelectableRegion הוא

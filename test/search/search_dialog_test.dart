@@ -4,7 +4,6 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
-import 'package:otzaria/widgets/controls/custom_switch.dart';
 import 'package:otzaria/widgets/controls/toggle_pill.dart';
 import 'package:otzaria/settings/engine/app_settings_store.dart';
 import 'package:flutter_spinbox/flutter_spinbox.dart';
@@ -31,6 +30,7 @@ import 'package:otzaria/plugins/services/plugin_search_field_session_service.dar
 import 'package:otzaria/plugins/view/plugin_search_field_actions.dart';
 import 'package:otzaria/plugins/services/plugin_search_selection_preferences.dart';
 import 'package:otzaria/search/bloc/search_event.dart';
+import 'package:otzaria/search/active_lexical_searches.dart';
 import 'package:otzaria/search/models/search_configuration.dart';
 import 'package:otzaria/search/bloc/search_bloc.dart';
 import 'package:otzaria/search/search_defaults.dart';
@@ -125,6 +125,13 @@ Future<void> main() async {
   final engineReady = await tryInitSearchEngine();
 
   setUpAll(() => registerFallbackValue(_FakeTabsEvent()));
+
+  // טיימר התקיעות של חיפוש שנשאר פתוח בסוף הטסט נחשב טיימר תלוי.
+  setUp(() {
+    ActiveLexicalSearches.instance = ActiveLexicalSearches(
+      stallThreshold: null,
+    );
+  });
 
   // מחסן טרי לכל טסט: טסט ששומר העדפת תצוגת תוצאות אחרת מזליג אותה לכל
   // טאב חיפוש שייבנה אחריו בקובץ.
@@ -464,7 +471,7 @@ Future<void> main() async {
 
         // ב־AppTogglePill המתג הוא הפקד; בשבב — השבב כולו.
         for (final target in [
-          find.descendant(of: row('sw'), matching: find.byType(CustomSwitch)),
+          find.descendant(of: row('sw'), matching: find.byType(Switch)),
           row('tmp'),
         ]) {
           await tester.ensureVisible(target);
@@ -2308,6 +2315,36 @@ Future<void> main() async {
       expect(tester.widget<FilterChip>(chip).selected, isFalse);
     }, skip: !engineReady);
 
+    testWidgets(
+      'ברירות המחדל נפתחות בתת־תפריט ו־Escape משאיר את הדיאלוג פתוח',
+      (
+        WidgetTester tester,
+      ) async {
+        await openDialog(tester);
+        final proximity = find.byKey(
+          const ValueKey('search-dialog-default-proximity'),
+        );
+
+        await openDefaultsMenu(tester);
+        expect(find.byType(SubmenuButton), findsOneWidget);
+        expect(proximity, findsNothing, reason: 'הקבוצה סגורה בפתיחה');
+
+        await tester.tap(find.text('קביעת ברירת מחדל לחיפוש מתקדם'));
+        await tester.pumpAndSettle();
+        expect(proximity, findsOneWidget);
+        expect(find.byType(SubmenuButton), findsOneWidget);
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+        await tester.pumpAndSettle();
+        expect(proximity, findsNothing);
+        expect(find.byType(SubmenuButton), findsNothing);
+        expect(find.byType(SearchDialog), findsOneWidget);
+        await openDefaultsMenu(tester);
+        expect(proximity, findsNothing);
+      },
+      skip: !engineReady,
+    );
+
     testWidgets('תפריט ברירות המחדל שומר את הטווח ואת הסדר ומחזיר אותם', (
       WidgetTester tester,
     ) async {
@@ -2320,6 +2357,11 @@ Future<void> main() async {
 
       await openDefaultsMenu(tester);
       await tester.tap(find.text('קביעת ברירת מחדל לחיפוש מתקדם'));
+      await tester.pumpAndSettle();
+      // בחלון נמוך הפריט האחרון בתת־התפריט עשוי לדרוש גלילה.
+      await tester.ensureVisible(
+        find.byKey(const ValueKey('search-dialog-default-proximity')),
+      );
       await tester.pumpAndSettle();
       await tester.tap(
         find.byKey(const ValueKey('search-dialog-default-proximity')),
@@ -2342,7 +2384,7 @@ Future<void> main() async {
       await tester.pumpAndSettle();
       expect(SearchDefaults.loadAnyOrderDefault(), isTrue);
       expect(tester.widget<CheckboxMenuButton>(defaultOrder).value, isFalse);
-      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      // הפוקוס נשאר בשדה: handler הדיאלוג סוגר קודם את התפריט הפתוח.
       await tester.sendKeyEvent(LogicalKeyboardKey.escape);
       await tester.pumpAndSettle();
       expect(dialogBloc(tester).state.anyOrder, isTrue);

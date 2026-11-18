@@ -1,3 +1,4 @@
+import 'package:flutter/services.dart';
 import 'package:otzaria/settings/engine/app_settings_store.dart';
 import 'package:otzaria/shortcuts/shortcut_helper.dart';
 
@@ -21,6 +22,9 @@ class ShortcutValidator {
   static const String openAdvancedSearchKey =
       'key-shortcut-open-advanced-search';
 
+  /// פתיחת טופס "דיווח על תקלה בתוכנה" — אופציונלי, ללא ברירת מחדל.
+  static const String openAppReportKey = 'key-shortcut-open-app-report';
+
   /// פתיחת חלון אוצריא נוסף — פעיל רק בפלטפורמה שתומכת בריבוי חלונות.
   static const String openNewWindowKey = 'key-shortcut-open-new-window';
 
@@ -31,12 +35,29 @@ class ShortcutValidator {
   static const String tikkunPrevPageKey = 'key-shortcut-tikkun-prev-page';
   static const String tikkunNextPageKey = 'key-shortcut-tikkun-next-page';
 
+  /// מקשי החיצים של אזור הקריאה בתצוגת הטקסט: עוד קיצור לפעולת הניווט
+  /// התואמת, שהקורא מפעיל לפי הפוקוס והבחירה. ביטולו משחרר את המקש.
+  static const String nextSegmentReaderKey = 'key-shortcut-next-segment-reader';
+  static const String prevSegmentReaderKey = 'key-shortcut-prev-segment-reader';
+  static const String nextTocReaderKey = 'key-shortcut-next-toc-reader';
+  static const String prevTocReaderKey = 'key-shortcut-prev-toc-reader';
+  static const List<String> readerShortcutKeys = [
+    nextSegmentReaderKey,
+    prevSegmentReaderKey,
+    nextTocReaderKey,
+    prevTocReaderKey,
+  ];
+
   static const Set<Set<String>> _compatibleShortcutGroups = {
     {'key-shortcut-add-note', 'key-shortcut-calendar-toggle-events'},
     {
       'key-shortcut-calendar-toggle-times',
       'key-shortcut-shamor-zachor-cycle-filter',
     },
+    {'key-shortcut-next-segment', nextSegmentReaderKey},
+    {'key-shortcut-prev-segment', prevSegmentReaderKey},
+    {'key-shortcut-next-toc', nextTocReaderKey},
+    {'key-shortcut-prev-toc', prevTocReaderKey},
   };
 
   static const Map<String, List<String>> legacyShortcutAliases = {
@@ -54,6 +75,10 @@ class ShortcutValidator {
     'key-shortcut-open-tool-aramaic-dictionary': 'builtin.aramaic_dictionary',
     'key-shortcut-open-tool-acronyms-dictionary': 'builtin.acronyms_dictionary',
   };
+
+  /// "בית הספרייה" — אופציונלי, ללא ברירת מחדל. מעביר לספרייה ומפעיל את אותה
+  /// פעולה כמו כפתור הבית שבה (חזרה לשורש, ניקוי חיפוש וכיווץ קטגוריות).
+  static const String openLibraryHomeKey = 'key-shortcut-open-library-home';
 
   /// קיצורי "העתק קישור" אופציונליים. הקיצור פועל לפי הטאב הפעיל: קישור למקטע
   /// בספר טקסט, וקישור לעמוד ב-PDF — שניהם תחת אותו מפתח. שני האחרונים רלוונטיים
@@ -185,6 +210,8 @@ class ShortcutValidator {
 
   static const List<String> _baseShortcutKeys = [
     'key-shortcut-open-library-browser',
+    // בית הספרייה — אופציונלי, ללא ברירת מחדל (ראה openLibraryHomeKey).
+    openLibraryHomeKey,
     currentWindowSearchKey,
     'key-shortcut-open-find-ref',
     'key-shortcut-close-tab',
@@ -194,6 +221,7 @@ class ShortcutValidator {
     'key-shortcut-open-reading-screen',
     'key-shortcut-open-new-search',
     openAdvancedSearchKey,
+    openAppReportKey,
     'key-shortcut-open-settings',
     'key-shortcut-open-more',
     'key-shortcut-open-bookmarks',
@@ -229,6 +257,7 @@ class ShortcutValidator {
     'key-shortcut-next-segment',
     'key-shortcut-prev-toc',
     'key-shortcut-next-toc',
+    ...readerShortcutKeys,
     reportErrorKey,
     // פתיחת כלים — אופציונלי, ללא ברירת מחדל (ראה openToolShortcutKeys).
     'key-shortcut-open-tool-calendar',
@@ -263,6 +292,7 @@ class ShortcutValidator {
 
   static const Map<String, String> _defaultShortcuts = {
     'key-shortcut-open-library-browser': 'ctrl+l',
+    openLibraryHomeKey: '',
     currentWindowSearchKey: 'ctrl+f',
     'key-shortcut-open-find-ref': 'ctrl+o',
     'key-shortcut-close-tab': 'ctrl+w',
@@ -272,6 +302,7 @@ class ShortcutValidator {
     'key-shortcut-open-reading-screen': 'ctrl+r',
     'key-shortcut-open-new-search': 'ctrl+shift+f',
     openAdvancedSearchKey: '',
+    openAppReportKey: '',
     'key-shortcut-open-settings': 'ctrl+comma',
     'key-shortcut-open-more': 'ctrl+m',
     'key-shortcut-open-bookmarks': 'ctrl+shift+b',
@@ -306,6 +337,10 @@ class ShortcutValidator {
     'key-shortcut-next-segment': 'alt+arrowdown',
     'key-shortcut-prev-toc': 'alt+pageup',
     'key-shortcut-next-toc': 'alt+pagedown',
+    nextSegmentReaderKey: 'arrowleft',
+    prevSegmentReaderKey: 'arrowright',
+    nextTocReaderKey: 'ctrl+arrowleft',
+    prevTocReaderKey: 'ctrl+arrowright',
     reportErrorKey: 'ctrl+shift+r',
     'key-shortcut-open-tool-calendar': '',
     'key-shortcut-open-tool-shamor-zachor': '',
@@ -330,6 +365,7 @@ class ShortcutValidator {
 
   static const Map<String, String> _baseShortcutNames = {
     'key-shortcut-open-library-browser': 'ספרייה',
+    openLibraryHomeKey: 'בית הספרייה',
     currentWindowSearchKey: 'חיפוש בספר הפתוח',
     'key-shortcut-open-find-ref': 'איתור',
     'key-shortcut-close-tab': 'סגור ספר נוכחי',
@@ -339,6 +375,7 @@ class ShortcutValidator {
     'key-shortcut-open-reading-screen': 'עיון',
     'key-shortcut-open-new-search': 'חיפוש חדש בכל הספרים',
     openAdvancedSearchKey: 'חיפוש מתקדם',
+    openAppReportKey: 'דיווח על תקלה בתוכנה',
     'key-shortcut-open-settings': 'הגדרות',
     'key-shortcut-open-more': 'כלים',
     'key-shortcut-open-bookmarks': 'סימניות',
@@ -373,6 +410,10 @@ class ShortcutValidator {
     'key-shortcut-next-segment': 'הקטע הבא',
     'key-shortcut-prev-toc': 'הדף/פרק הקודם',
     'key-shortcut-next-toc': 'הדף/פרק הבא',
+    nextSegmentReaderKey: 'הקטע הבא (באזור הקריאה)',
+    prevSegmentReaderKey: 'הקטע הקודם (באזור הקריאה)',
+    nextTocReaderKey: 'הדף/פרק הבא (באזור הקריאה)',
+    prevTocReaderKey: 'הדף/פרק הקודם (באזור הקריאה)',
     reportErrorKey: 'דווח על טעות בספר',
     'key-shortcut-open-tool-calendar': 'פתיחת לוח שנה',
     'key-shortcut-open-tool-shamor-zachor': 'פתיחת שמור וזכור',
@@ -494,6 +535,36 @@ class ShortcutValidator {
     }
     return false;
   }
+
+  /// מקש אזור הקריאה ([readerShortcutKeys]) ש-[event] מפעיל, או null. עם
+  /// טקסט מסומן Ctrl+חץ שייך לבחירה. [byDefault] — לפי ברירות המחדל.
+  static String? readerShortcutFor(
+    KeyEvent event, {
+    bool hasSelection = false,
+    bool byDefault = false,
+  }) {
+    for (final key in readerShortcutKeys) {
+      final shortcut = byDefault
+          ? _defaultShortcuts[key]
+          : getShortcutValue(key);
+      if (shortcut == null ||
+          !ShortcutHelper.matchesReaderShortcut(event, shortcut)) {
+        continue;
+      }
+      final parts = shortcut.split('+');
+      final movesSelection =
+          hasSelection &&
+          parts.contains('ctrl') &&
+          parts.last.startsWith('arrow');
+      return movesSelection ? null : key;
+    }
+    return null;
+  }
+
+  /// מקש ברירת מחדל של אזור הקריאה שהמשתמש שחרר בהגדרות.
+  static bool isReleasedReaderKey(KeyEvent event) =>
+      readerShortcutFor(event, byDefault: true) != null &&
+      readerShortcutFor(event) == null;
 
   static bool canShareShortcut(String firstKey, String secondKey) {
     final normalizedFirst = canonicalSettingKey(firstKey);

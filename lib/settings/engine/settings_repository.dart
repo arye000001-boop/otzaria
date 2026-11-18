@@ -43,6 +43,7 @@ class SettingsRepository {
   /// ב-[keyAutoUpdateIndex], שגרסאות קודמות קוראות.
   static const String keyIndexUpdateMode = 'key-index-update-mode';
   static const String keyIndexingResourceMode = 'key-indexing-resource-mode';
+  static const String keyIndexPdfBooks = 'key-index-pdf-books';
   static const String keyDefaultNikud = 'key-default-nikud';
   static const String keyRemoveNikudFromTanach = 'key-remove-nikud-tanach';
   static const String keyDefaultRemovePunctuation =
@@ -88,6 +89,7 @@ class SettingsRepository {
   static const String keyPdfHandMode = 'key-pdf-hand-mode';
   static const String keyTalmudBavliOpenFormat = 'key-talmud-bavli-open-format';
   static const String keyOfflineMode = 'key-offline-mode';
+  static const String keyDownloadsWifiOnly = 'key-downloads-wifi-only';
   static const String keyAutoSync = 'key-auto-sync';
   static const String keySoftwareAndBookUpdatesEnabled =
       'key-software-and-book-updates-enabled';
@@ -127,6 +129,14 @@ class SettingsRepository {
   /// תג release וקטורים שהמנוע זיהה כפרסום חוזר של גרסה מותקנת; לא מורידים שוב.
   static const String keySemanticSkippedVectorsRelease =
       'key-semantic-skipped-vectors-release';
+
+  /// מתי נתוני החיפוש החכם מתעדכנים ברקע (SemanticUpdateFrequency).
+  static const String keySemanticUpdateFrequency =
+      'key-semantic-update-frequency';
+
+  /// מועד ההתקנה המוצלחת האחרונה של וקטורי החיפוש החכם (ISO-8601).
+  static const String keySemanticLastVectorsUpdate =
+      'key-semantic-last-vectors-update';
   static const String keyLibraryPath = 'key-library-path';
   static const String keyIndexPath = 'key-index-path';
   static const String keyDatabasesPath = 'key-databases-path';
@@ -304,6 +314,7 @@ class SettingsRepository {
     keyAutoUpdateIndex,
     keyIndexUpdateMode,
     keyIndexingResourceMode,
+    keyIndexPdfBooks,
     keyDefaultNikud,
     keyRemoveNikudFromTanach,
     keyDefaultRemovePunctuation,
@@ -335,6 +346,7 @@ class SettingsRepository {
     keyPdfHandMode,
     keyTalmudBavliOpenFormat,
     keyOfflineMode,
+    keyDownloadsWifiOnly,
     keyAutoSync,
     keySoftwareAndBookUpdatesEnabled,
     keyUpdateCheckFrequency,
@@ -350,6 +362,8 @@ class SettingsRepository {
     keySemanticDataEnabled,
     keySemanticDownloadPaused,
     keySemanticSkippedVectorsRelease,
+    keySemanticUpdateFrequency,
+    keySemanticLastVectorsUpdate,
     keyLibraryPath,
     keyIndexPath,
     keyDatabasesPath,
@@ -424,7 +438,10 @@ class SettingsRepository {
   /// קריאה סינכרונית של ההגדרות השמורות — למצב ההתחלתי של ה-bloc, כדי
   /// שהמסך הראשון לא ייבנה מברירות מחדל ויקפוץ אחרי הטעינה (issue #1280).
   Map<String, dynamic> readSettings() {
-    final fontSize = _settings.getValue<double>(keyFontSize, defaultValue: 25);
+    final fontSize = _settings.getValue<double>(
+      keyFontSize,
+      defaultValue: AppFonts.defaultReadingSize,
+    );
     return {
       'isDarkMode': _settings.getValue<bool>(keyDarkMode, defaultValue: false),
       'followSystemTheme': _settings.getValue<bool>(
@@ -495,6 +512,10 @@ class SettingsRepository {
       ),
       'indexingResourceMode': IndexingResourceMode.fromStorage(
         _settings.getValue<String>(keyIndexingResourceMode, defaultValue: ''),
+      ),
+      'indexPdfBooks': _settings.getValue<bool>(
+        keyIndexPdfBooks,
+        defaultValue: true,
       ),
       'indexUpdateMode': IndexUpdateMode.resolve(
         legacyEnabled: _settings.getValue<bool>(
@@ -599,6 +620,10 @@ class SettingsRepository {
       ),
       'isOfflineMode': _settings.getValue<bool>(
         keyOfflineMode,
+        defaultValue: false,
+      ),
+      'downloadsWifiOnly': _settings.getValue<bool>(
+        keyDownloadsWifiOnly,
         defaultValue: false,
       ),
       'softwareAndBookUpdatesEnabled': _settings.getValue<bool>(
@@ -843,6 +868,9 @@ class SettingsRepository {
   Future<void> updateIndexingResourceMode(IndexingResourceMode mode) =>
       _settings.setValue(keyIndexingResourceMode, mode.name);
 
+  Future<void> updateIndexPdfBooks(bool value) =>
+      _settings.setValue(keyIndexPdfBooks, value);
+
   Future<void> updateIndexUpdateMode(IndexUpdateMode mode) async {
     await _settings.setValue(keyAutoUpdateIndex, mode.isAutomatic);
     await _settings.setValue(keyIndexUpdateMode, mode.storageValue);
@@ -988,6 +1016,10 @@ class SettingsRepository {
 
   Future<void> updateTalmudBavliOpenFormat(String value) async {
     await _settings.setValue(keyTalmudBavliOpenFormat, value);
+  }
+
+  Future<void> updateDownloadsWifiOnly(bool value) async {
+    await _settings.setValue(keyDownloadsWifiOnly, value);
   }
 
   Future<void> updateOfflineMode(bool value) async {
@@ -1370,7 +1402,10 @@ class SettingsRepository {
     if (saved != null) return;
     await _settings.setValue(
       keySearchResultsFontSize,
-      _settings.getValue<double>(keyFontSize, defaultValue: 25),
+      _settings.getValue<double>(
+        keyFontSize,
+        defaultValue: AppFonts.defaultReadingSize,
+      ),
     );
   }
 
@@ -1386,7 +1421,7 @@ class SettingsRepository {
       AppSeedColors.defaultDark.toARGB32(),
     );
     await _settings.setValue(keyTextColumnWidth, 0.0);
-    await _settings.setValue(keyFontSize, 25.0);
+    await _settings.setValue(keyFontSize, AppFonts.defaultReadingSize);
     await _settings.setValue(keyFontFamily, AppFonts.defaultFont);
     await _settings.setValue(
       keyCommentatorsFontFamily,
@@ -1395,7 +1430,10 @@ class SettingsRepository {
     await _settings.setValue(keyFontBold, false);
     await _settings.setValue(keyCommentatorsFontBold, false);
     await _settings.setValue(keyCommentatorsFontSize, 22.0);
-    await _settings.setValue(keySearchResultsFontSize, 25.0);
+    await _settings.setValue(
+      keySearchResultsFontSize,
+      AppFonts.defaultReadingSize,
+    );
     await _settings.setValue(keyLineHeight, 1.5);
     await _settings.setValue(keyShowOtzarHachochma, false);
     await _settings.setValue(keyShowHebrewBooks, false);
@@ -1404,6 +1442,7 @@ class SettingsRepository {
     await updateTextDisplayPolicy(TextDisplayPolicy.empty);
     await updateIndexUpdateMode(IndexUpdateMode.all);
     await updateIndexingResourceMode(IndexingResourceMode.automatic);
+    await updateIndexPdfBooks(true);
     await _settings.setValue(keyContinuousReadingMode, false);
     await _settings.setValue(keyDefaultSidebarOpen, false);
     await _settings.setValue(keyDefaultCommentaryOpen, false);

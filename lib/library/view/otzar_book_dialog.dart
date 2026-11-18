@@ -12,6 +12,7 @@ import '../bloc/library_bloc.dart';
 import '../bloc/library_event.dart';
 import 'package:otzaria/core/error_log_file.dart';
 import 'package:otzaria/core/messages/library_messages.dart';
+import 'package:otzaria/core/messages/common_messages.dart';
 import 'package:otzaria/data/data_providers/external_catalog_mapper.dart';
 import 'package:otzaria/library/services/hebrew_books_download_service.dart';
 import 'package:otzaria/settings/engine/settings_bloc.dart';
@@ -217,24 +218,27 @@ class _HebrewBookDownloadButton extends StatefulWidget {
 
 class _HebrewBookDownloadButtonState extends State<_HebrewBookDownloadButton> {
   bool _isDownloading = false;
+  bool _waitingForWifi = false;
   int? _percent;
 
   @override
   Widget build(BuildContext context) {
-    final label = _isDownloading
+    final label = _waitingForWifi
+        ? CommonMessages.waitingForWifi
+        : _isDownloading
         ? (_percent == null ? 'מוריד...' : 'מוריד... $_percent%')
         : 'הורדת הקובץ';
     return ActionButton.neutral(
       text: label,
       icon: FluentIcons.arrow_download_24_regular,
-      isLoading: _isDownloading,
+      isLoading: _isDownloading && !_waitingForWifi,
       onPressed: _isDownloading ? null : _download,
     );
   }
 
   Future<void> _download() async {
-    final hasFolder = HebrewBooksDownloadService.configuredFolder() != null;
-    if (!hasFolder && !await verifySaferModePassword(context)) return;
+    final folder = HebrewBooksDownloadService.configuredFolder();
+    if (folder == null && !await verifySaferModePassword(context)) return;
     if (!mounted || context.read<SettingsBloc>().state.isOfflineMode) return;
     // נלכד מראש: ההורדה ממשיכה גם אם הדיאלוג נסגר באמצע.
     final libraryBloc = context.read<LibraryBloc>();
@@ -245,30 +249,52 @@ class _HebrewBookDownloadButtonState extends State<_HebrewBookDownloadButton> {
     });
     final service = HebrewBooksDownloadService();
     try {
-      final result = await service.download(
-        widget.bookId,
-        onProgress: (received, total) {
-          if (!mounted || total == null || total <= 0) return;
-          final percent = (received * 100 ~/ total).clamp(0, 100);
-          if (percent == _percent) return;
-          setState(() => _percent = percent);
-        },
-      );
+      void onWaitingForWifi() {
+        if (mounted) setState(() => _waitingForWifi = true);
+      }
 
-      var savedPath = await HebrewBooksDownloadService.saveToConfiguredFolder(
-        widget.bookId,
-        result.bytes,
-      );
+      void onProgress(int received, int? total) {
+        if (!mounted) return;
+        if (_waitingForWifi) setState(() => _waitingForWifi = false);
+        if (total == null || total <= 0) return;
+        final percent = (received * 100 ~/ total).clamp(0, 100);
+        if (percent == _percent) return;
+        setState(() => _percent = percent);
+      }
+
+      String? savedPath;
+      HebrewBookDownload? result;
+      if (folder != null) {
+        savedPath = await service.downloadToFolder(
+          widget.bookId,
+          folder,
+          onWaitingForWifi: onWaitingForWifi,
+          onProgress: onProgress,
+        );
+      } else {
+        result = await service.download(
+          widget.bookId,
+          onWaitingForWifi: onWaitingForWifi,
+          onProgress: onProgress,
+        );
+        savedPath = await HebrewBooksDownloadService.saveToConfiguredFolder(
+          widget.bookId,
+          result.bytes,
+        );
+      }
+
       if (savedPath != null && !libraryBloc.isClosed) {
         libraryBloc.add(const ExternalBooksChanged());
       }
       if (!mounted) return;
-      savedPath ??= await saveFileWithExtension(
-        fileName: result.fileName,
-        extension: 'pdf',
-        bytes: result.bytes,
-        context: context,
-      );
+      if (savedPath == null && result != null) {
+        savedPath = await saveFileWithExtension(
+          fileName: result.fileName,
+          extension: 'pdf',
+          bytes: result.bytes,
+          context: context,
+        );
+      }
 
       if (savedPath == null) {
         UiSnack.show(LibraryMessages.hebrewBookDownloadCanceled);
@@ -294,6 +320,7 @@ class _HebrewBookDownloadButtonState extends State<_HebrewBookDownloadButton> {
       if (mounted) {
         setState(() {
           _isDownloading = false;
+          _waitingForWifi = false;
           _percent = null;
         });
       }

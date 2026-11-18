@@ -58,6 +58,7 @@ class PluginHostShortcuts {
   /// מפתחות ההגדרות שערכן מועבר לתוסף.
   static const List<String> forwardedSettingKeys = [
     'key-shortcut-open-library-browser',
+    ShortcutValidator.openLibraryHomeKey,
     'key-shortcut-open-find-ref',
     'key-shortcut-close-tab',
     'key-shortcut-close-all-tabs',
@@ -66,6 +67,7 @@ class PluginHostShortcuts {
     'key-shortcut-open-reading-screen',
     'key-shortcut-open-new-search',
     ShortcutValidator.openAdvancedSearchKey,
+    ShortcutValidator.openAppReportKey,
     ShortcutValidator.openNewWindowKey,
     'key-shortcut-open-settings',
     'key-shortcut-open-more',

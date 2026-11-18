@@ -8,7 +8,6 @@ import 'package:flutter_test/flutter_test.dart';
 // ignore: depend_on_referenced_packages
 import 'package:material_ui/material_ui.dart' as mui;
 import 'package:otzaria/models/books.dart';
-import 'package:otzaria/pdf_book/bloc/pdf_book_bloc.dart';
 import 'package:otzaria/pdf_book/bloc/pdf_book_state.dart';
 import 'package:otzaria/pdf_book/view/pdf_book_screen.dart';
 import 'package:otzaria/settings/engine/settings_bloc.dart';
@@ -22,6 +21,7 @@ import 'package:pdf/widgets.dart' as pw;
 import 'package:pdfrx/pdfrx.dart';
 
 import '../helpers/memory_settings_cache.dart';
+import '../helpers/pdf_viewer_mounted.dart';
 import '../test_helpers/stub_settings_bloc.dart';
 
 void main() {
@@ -36,7 +36,7 @@ void main() {
     final moduleName = Platform.isWindows
         ? 'pdfium.dll'
         : Platform.isMacOS
-        ? 'libpdfium.dylib'
+        ? 'libpdfium_dart.dylib'
         : 'libpdfium.so';
     Pdfrx.pdfiumModulePath = File(
       'build/native_assets/${Platform.operatingSystem}/$moduleName',
@@ -91,7 +91,7 @@ void main() {
         ),
       ),
     );
-    final bloc = tester.element(find.byType(PdfViewer)).read<PdfBookBloc>();
+    final bloc = await pumpUntilPdfViewer(tester);
     for (var i = 0; i < 100 && bloc.state is! PdfBookLoaded; i++) {
       await tester.runAsync(
         () => Future<void>.delayed(const Duration(milliseconds: 20)),
@@ -113,6 +113,16 @@ void main() {
     await tester.pump(const Duration(milliseconds: 300));
 
     expect(find.byType(NavPanelPinButton), findsOneWidget);
+    await tester.tap(find.byTooltip('נעץ את החלונית'));
+    await tester.pump();
+    tester.view.physicalSize = const Size(450, 1000);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.byTooltip('בטל נעיצה'), findsOneWidget);
+    await tester.tap(find.byTooltip('בטל נעיצה'));
+    await tester.pump();
+    expect(find.byTooltip('נעץ את החלונית'), findsNothing);
+    expect(tab.pinLeftPane.value, isFalse);
 
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump(const Duration(milliseconds: 200));

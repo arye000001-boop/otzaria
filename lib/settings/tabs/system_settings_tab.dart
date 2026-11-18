@@ -2,7 +2,8 @@ import 'package:otzaria/search_feedback/semantic_search_strings.dart';
 import 'package:otzaria/android_update/view/android_update_view.dart';
 import 'dart:async';
 import 'dart:io';
-import 'package:flutter/foundation.dart' show mapEquals;
+import 'package:flutter/foundation.dart'
+    show mapEquals, defaultTargetPlatform, TargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:fluentui_system_icons/fluentui_system_icons.dart';
@@ -49,6 +50,7 @@ import 'package:otzaria/services/data_collection_service.dart';
 import 'package:otzaria/data/repository/data_repository.dart';
 import 'package:otzaria/widgets/widgets_exports.dart';
 import 'package:otzaria/settings/widgets/settings_widgets_exports.dart';
+import 'package:otzaria/settings/widgets/download_network_settings_tile.dart';
 import 'package:otzaria/widgets/misc/app_popup_menu.dart';
 import 'package:otzaria/widgets/misc/app_dropdown_field.dart';
 import 'package:otzaria/tools/calendar/helpers/calendar_date_helpers.dart';
@@ -725,6 +727,8 @@ class _SystemSettingsTabState extends State<SystemSettingsTab> {
             },
           ),
         ),
+        if (defaultTargetPlatform == TargetPlatform.android)
+          const DownloadNetworkSettingsTile(),
         SettingsSwitchTile(
           icon: FluentIcons.arrow_download_24_regular,
           title: context.settingsText('עדכוני תוכנה וספרים'),
@@ -1374,45 +1378,49 @@ class _SystemSettingsTabState extends State<SystemSettingsTab> {
         ),
 
         // ── גיבוי אוטומטי ──
-        ExpandableSection(
-          headerKey: _backupHeaderKey,
-          icon: FluentIcons.calendar_clock_24_regular,
-          title: context.settingsText('גיבוי אוטומטי'),
-          subtitle: _buildAutoBackupSubtitle(autoFrequency),
-          trailing: AppDropdownField<String>(
-            value: autoFrequency,
-            entries: [
-              AppMenuEntry(
-                value: 'none',
-                label: context.settingsText('ללא'),
-                subtitle: context.settingsText('גיבוי אוטומטי מושבת'),
-              ),
-              AppMenuEntry(
-                value: 'daily',
-                label: context.settingsText('יומי'),
-                subtitle: context.settingsText('יתבצע גיבוי בכל יום'),
-              ),
-              AppMenuEntry(
-                value: 'weekly',
-                label: context.settingsText('שבועי'),
-                subtitle: context.settingsText('יתבצע גיבוי כל שבוע'),
-              ),
-              AppMenuEntry(
-                value: 'monthly',
-                label: context.settingsText('חודשי'),
-                subtitle: context.settingsText('יתבצע גיבוי כל חודש'),
-              ),
-            ],
-            onSelected: (value) {
-              if (value == null) return;
-              context.read<SettingsBloc>().add(
-                UpdateAutoBackupFrequency(value),
-              );
-            },
-            isExpanded: false,
-          ),
-          onTap: () => setState(() => _isBackupExpanded = !_isBackupExpanded),
+        ExpandableCard(
+          wrapInCard: false,
           isExpanded: _isBackupExpanded,
+          header: ExpandableSettingsTile(
+            headerKey: _backupHeaderKey,
+            icon: FluentIcons.calendar_clock_24_regular,
+            title: context.settingsText('גיבוי אוטומטי'),
+            subtitle: _buildAutoBackupSubtitle(autoFrequency),
+            trailing: AppDropdownField<String>(
+              value: autoFrequency,
+              entries: [
+                AppMenuEntry(
+                  value: 'none',
+                  label: context.settingsText('ללא'),
+                  subtitle: context.settingsText('גיבוי אוטומטי מושבת'),
+                ),
+                AppMenuEntry(
+                  value: 'daily',
+                  label: context.settingsText('יומי'),
+                  subtitle: context.settingsText('יתבצע גיבוי בכל יום'),
+                ),
+                AppMenuEntry(
+                  value: 'weekly',
+                  label: context.settingsText('שבועי'),
+                  subtitle: context.settingsText('יתבצע גיבוי כל שבוע'),
+                ),
+                AppMenuEntry(
+                  value: 'monthly',
+                  label: context.settingsText('חודשי'),
+                  subtitle: context.settingsText('יתבצע גיבוי כל חודש'),
+                ),
+              ],
+              onSelected: (value) {
+                if (value == null) return;
+                context.read<SettingsBloc>().add(
+                  UpdateAutoBackupFrequency(value),
+                );
+              },
+              isExpanded: false,
+            ),
+            isExpanded: _isBackupExpanded,
+            onTap: () => setState(() => _isBackupExpanded = !_isBackupExpanded),
+          ),
           children: [
             // במובייל dart:io לא יכול לכתוב לתיקייה שנבחרת דרך SAF —
             // הגיבוי נשאר בתיקייה הפנימית והייצוא נעשה דרך "ייצא קובץ".

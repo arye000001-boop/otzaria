@@ -131,11 +131,16 @@ class ReferenceBooksCache {
       // יציאה ל-event loop כל chunk כדי לא לחסום את ה-UI thread על
       // ספריות גדולות (~50K ספרים × regex לנורמליזציה).
       final localNormalizedTitles = <int, String>{};
+      final localTitleTokens = <int, List<String>>{};
+      final localMatchTitles = <int, String>{};
       const yieldBatch = 1000;
       var processed = 0;
       // עותק: הלולאה ממתינה באמצע, ו-books הוא תצוגה חיה של הקאש.
       for (final book in BooksCache.instance.books.toList(growable: false)) {
-        localNormalizedTitles[book.id] = _normalizeForMatch(book.title);
+        final normalized = _normalizeForMatch(book.title);
+        localNormalizedTitles[book.id] = normalized;
+        localTitleTokens[book.id] = _splitTitleTokens(normalized);
+        localMatchTitles[book.id] = bookNameMatchForm(normalized);
         if (++processed % yieldBatch == 0) {
           await Future<void>.delayed(Duration.zero);
           if (myGen != _generation) return;
@@ -163,7 +168,8 @@ class ReferenceBooksCache {
       // PDF outline parsing is NOT done here — it happens lazily via getPdfOutlineEntries().
       final localFsPdfBooks = <(String, ReferenceBookHit)>[];
       if (FileSystemLibraryProvider.instance.isInitialized) {
-        final keyToPath = await FileSystemLibraryProvider.instance.keyToPath;
+        final keyToPath =
+            await FileSystemLibraryProvider.instance.physicalKeyToPath;
         if (myGen != _generation) return;
         var processedPdfs = 0;
         for (final entry in keyToPath.entries) {
@@ -198,7 +204,11 @@ class ReferenceBooksCache {
       // Swap אטומי — רק אם הדור עדיין שלנו.
       if (myGen != _generation) return;
 
-      _official.installTitles(localNormalizedTitles);
+      _official.installTitles(
+        localNormalizedTitles,
+        titleTokens: localTitleTokens,
+        matchTitles: localMatchTitles,
+      );
       _fsPdfBooks
         ..clear()
         ..addAll(localFsPdfBooks);
@@ -206,6 +216,7 @@ class ReferenceBooksCache {
         ..clear()
         ..addAll(dbPdfTitles);
       _categoryPaths.clear();
+      _eraBooks = null;
 
       if (!await _prewarmFuzzyVocabulary(localNormalizedTitles, myGen)) return;
       if (myGen != _generation) return;
@@ -269,6 +280,7 @@ class ReferenceBooksCache {
         _official.clearTitles();
         _fsPdfBooks.clear();
         _categoryPaths.clear();
+        _eraBooks = null;
         _isLoaded = false;
       }
     }
@@ -281,6 +293,7 @@ class ReferenceBooksCache {
     _dbPdfTitles.clear();
     _pdfOutlineCache.clear();
     _categoryPaths.clear();
+    _eraBooks = null;
     _isLoaded = false;
     _loadingFuture = null;
     // Note: We don't clear the shared caches here as they may be used by other components
@@ -296,6 +309,10 @@ class ReferenceBooksCache {
   // SQL + O(books) in-memory walk), כדי שדירוג ה-FindRef יוכל לסווג "ספר
   // יסוד" מול "מפרש" סינכרונית בלי race עם ה-warmUp.
   final Map<int, String> _categoryPaths = <int, String>{};
+
+  // הספרים בקבוצות נשמרים בסדר הקטלוג של הדור שממנו נבנו.
+  ({int booksGeneration, Map<CommentaryEra, List<BookCacheEntry>> buckets})?
+  _eraBooks;
 
   /// גרסה סינכרונית של [getCategoryPathForBook]: מחזירה `null` אם הערך
   /// אינו בקאש (למשל לפני warmUp או עבור ספרים שאינם ב-DB).
@@ -322,16 +339,26 @@ class ReferenceBooksCache {
       return '';
     }
 
+    final myGen = _generation;
+    final booksGeneration = BooksCache.instance.generation;
     try {
       final path = await BookDatabaseResolver.buildCategoryPath(
         repository,
         book.categoryId,
       );
-      _categoryPaths[bookId] = path;
+      if (myGen == _generation &&
+          booksGeneration == BooksCache.instance.generation &&
+          _categoryPaths[bookId] != path) {
+        _categoryPaths[bookId] = path;
+        _eraBooks = null;
+      }
       return path;
     } catch (e) {
       debugPrint('[ReferenceBooksCache] getCategoryPathForBook error: $e');
-      _categoryPaths[bookId] = '';
+      if (myGen == _generation &&
+          booksGeneration == BooksCache.instance.generation) {
+        _categoryPaths.putIfAbsent(bookId, () => '');
+      }
       return '';
     }
   }
@@ -386,14 +413,22 @@ class ReferenceBooksCache {
 
       const yieldBatch = 1000;
       var processed = 0;
+      final booksGeneration = BooksCache.instance.generation;
+      final paths = <int, String>{};
+      final erasByPath = <String, CommentaryEra>{};
+      final buckets = <CommentaryEra, List<BookCacheEntry>>{};
       // עותק: הלולאה ממתינה באמצע, ו-books הוא תצוגה חיה של הקאש.
       for (final book in BooksCache.instance.books.toList(growable: false)) {
-        _categoryPaths[book.id] = pathFor(book.categoryId);
+        final path = pathFor(book.categoryId);
+        paths[book.id] = path;
+        _addEraBook(buckets, erasByPath, book, path);
         if (++processed % yieldBatch == 0) {
           await Future<void>.delayed(Duration.zero);
           if (myGen != _generation) return true; // ביטול.
         }
       }
+      _categoryPaths.addAll(paths);
+      _eraBooks = (booksGeneration: booksGeneration, buckets: buckets);
       return true;
     } catch (e) {
       debugPrint('[ReferenceBooksCache] _prewarmCategoryPaths failed: $e');
@@ -543,6 +578,15 @@ class ReferenceBooksCache {
     _categoryPaths
       ..clear()
       ..addAll(categoryPaths);
+    final erasByPath = <String, CommentaryEra>{};
+    final buckets = <CommentaryEra, List<BookCacheEntry>>{};
+    for (final book in BooksCache.instance.books) {
+      _addEraBook(buckets, erasByPath, book, _categoryPaths[book.id] ?? '');
+    }
+    _eraBooks = (
+      booksGeneration: BooksCache.instance.generation,
+      buckets: buckets,
+    );
     final booksByWord = <String, List<int>>{};
     _official.collectFuzzyWords(booksByWord, normalizedTitles.entries);
     _official.installFuzzyVocabulary(booksByWord);
@@ -650,19 +694,29 @@ class ReferenceBooksCache {
   }) {
     if (topicTokens.isEmpty) return const <ReferenceBookHit>[];
 
+    final books = BooksCache.instance;
+    final index = _eraBooks;
+    final Iterable<BookCacheEntry> candidates;
+    if (index != null && index.booksGeneration == books.generation) {
+      candidates = index.buckets[era] ?? const [];
+    } else {
+      candidates = books.books.where((book) {
+        final path = _categoryPaths[book.id];
+        return path != null &&
+            path.isNotEmpty &&
+            eraFromCategoryPath(path) == era;
+      });
+    }
+
     final hits = <ReferenceBookHit>[];
-    for (final book in BooksCache.instance.books) {
+    for (final book in candidates) {
       if (allowsBook != null &&
           !allowsBook(book.id, book.filePath ?? '', book.fileType)) {
         continue;
       }
-      final path = _categoryPaths[book.id];
-      if (path == null || path.isEmpty) continue;
-      if (eraFromCategoryPath(path) != era) continue;
-
       final t = _official._normalizedTitles[book.id] ?? '';
       if (t.isEmpty) continue;
-      final titleTokens = t.split(' ').where((w) => w.isNotEmpty);
+      final titleTokens = _official._titleTokens[book.id]!;
       final matches = topicTokens.every(
         (qt) => titleTokens.any((w) => w.startsWith(qt)),
       );
@@ -677,11 +731,23 @@ class ReferenceBooksCache {
           fileType: book.fileType,
           matchRank: 0,
           orderIndex: book.orderIndex,
+          titleTokens: titleTokens,
         ),
       );
       if (hits.length >= limit) break;
     }
     return hits;
+  }
+
+  static void _addEraBook(
+    Map<CommentaryEra, List<BookCacheEntry>> buckets,
+    Map<String, CommentaryEra> erasByPath,
+    BookCacheEntry book,
+    String path,
+  ) {
+    if (path.isEmpty) return;
+    final era = erasByPath.putIfAbsent(path, () => eraFromCategoryPath(path));
+    (buckets[era] ??= []).add(book);
   }
 
   /// מסווג ספר לדור לפי segment בנתיב הקטגוריה. מכסה ראשונים/אחרונים/מחברי
@@ -1047,38 +1113,49 @@ class BookTitleIndex {
   /// כולה מכילה ~6,900 מילים שונות בלבד, ולכן ההתאמה המקורבת רצה עליהן פעם
   /// אחת לכל מילת שאילתה במקום על ~190,000 המילים שבספרים.
   final List<String> _fuzzyVocabulary = <String>[];
-  final List<Uint32List> _fuzzyVocabularyBooks = <Uint32List>[];
+  final List<Iterable<int>> _fuzzyVocabularyBooks = <Iterable<int>>[];
+  final Map<String, Set<int>> _exactShortWordBooks = <String, Set<int>>{};
 
   /// מטמון חסום של המסננת לפי מילת שאילתה: `findRefs` קורא ל-[search] עד
   /// ארבע פעמים על אותה שאילתה, וההקלדה הבאה חוזרת על כל המילים חוץ מהאחרונה.
   final Map<String, Set<int>> _fuzzyWordCandidates = <String, Set<int>>{};
   static const int _fuzzyWordCandidatesLimit = 128;
 
-  void installTitles(Map<int, String> titles) {
+  /// [titleTokens] ו-[matchTitles] — תוצאות מחושבות מראש של [titles] (מהלולאה
+  /// עם ה-yield בטעינה); בלעדיהן הן מחושבות כאן, בבלוק סינכרוני אחד.
+  void installTitles(
+    Map<int, String> titles, {
+    Map<int, List<String>>? titleTokens,
+    Map<int, String>? matchTitles,
+  }) {
     _normalizedTitles
       ..clear()
       ..addAll(titles);
     _titleTokens
       ..clear()
-      ..addAll({
-        for (final entry in titles.entries)
-          entry.key: _splitTitleTokens(entry.value),
-      });
+      ..addAll(
+        titleTokens ??
+            {
+              for (final entry in titles.entries)
+                entry.key: _splitTitleTokens(entry.value),
+            },
+      );
     _matchTitles
       ..clear()
-      ..addAll({
-        for (final entry in titles.entries)
-          entry.key: bookNameMatchForm(entry.value),
-      });
+      ..addAll(
+        matchTitles ??
+            {
+              for (final entry in titles.entries)
+                entry.key: bookNameMatchForm(entry.value),
+            },
+      );
     _matchTitleTokens.clear();
     _matchAcronyms.clear();
   }
 
   void clearTitles() {
     installTitles(const {});
-    _fuzzyVocabulary.clear();
-    _fuzzyVocabularyBooks.clear();
-    _fuzzyWordCandidates.clear();
+    installFuzzyVocabulary(const {});
   }
 
   List<ReferenceBookHit> search(
@@ -1384,12 +1461,20 @@ class BookTitleIndex {
 
   void installFuzzyVocabulary(Map<String, List<int>> booksByWord) {
     _fuzzyWordCandidates.clear();
-    _fuzzyVocabulary
-      ..clear()
-      ..addAll(booksByWord.keys);
-    _fuzzyVocabularyBooks
-      ..clear()
-      ..addAll(booksByWord.values.map(Uint32List.fromList));
+    _exactShortWordBooks.clear();
+    _fuzzyVocabulary.clear();
+    _fuzzyVocabularyBooks.clear();
+    for (final entry in booksByWord.entries) {
+      final ids = Uint32List.fromList(entry.value);
+      _fuzzyVocabulary.add(entry.key);
+      if (entry.key.length < _minFuzzyWordLength) {
+        final books = ids.toSet();
+        _exactShortWordBooks[entry.key] = books;
+        _fuzzyVocabularyBooks.add(books);
+      } else {
+        _fuzzyVocabularyBooks.add(ids);
+      }
+    }
   }
 
   /// מזהי הספרים שבהם לכל אחת מ-[queryWords] יש מילה מתאימה — קבוצת-העל של
@@ -1401,15 +1486,30 @@ class BookTitleIndex {
     }
 
     Set<int>? candidates;
-    for (final word in queryWords) {
-      if (word.isEmpty) continue;
-      final forWord = _fuzzyCandidatesForWord(word);
+    bool intersect(Set<int> forWord) {
+      if (forWord.isEmpty) return false;
+      final current = candidates;
+      if (current == null) {
+        candidates = forWord;
+        return true;
+      }
+      // שתי הקבוצות עשויות להיות במטמון. חיתוך סורק רק את הקטנה מהן.
+      final common = current.length <= forWord.length
+          ? current.intersection(forWord)
+          : forWord.intersection(current);
+      candidates = common;
+      return common.isNotEmpty;
+    }
 
-      // העתקה ולא שימוש חוזר: הרשימה מגיעה מהמטמון, ו-retainAll היה פוגם בה.
-      candidates == null
-          ? candidates = <int>{...forWord}
-          : candidates.retainAll(forWord);
-      if (candidates.isEmpty) return const <int>{};
+    // מילה קצרה דורשת התאמה מדויקת. בודקים אותה לפני סריקת אוצר המילים.
+    for (final word in queryWords) {
+      if (word.isEmpty || word.length >= _minFuzzyWordLength) continue;
+      final exact = _exactShortWordBooks[word];
+      if (exact == null || !intersect(exact)) return const <int>{};
+    }
+    for (final word in queryWords) {
+      if (word.length < _minFuzzyWordLength) continue;
+      if (!intersect(_fuzzyCandidatesForWord(word))) return const <int>{};
     }
     return candidates ?? const <int>{};
   }
@@ -1419,16 +1519,11 @@ class BookTitleIndex {
     final cached = _fuzzyWordCandidates[word];
     if (cached != null) return cached;
 
-    // מילה קצרה נדרשת כמילה שלמה ולא בקירוב, ולכן גם המסננת מדויקת —
-    // `contains` עליה היה מחזיר כמעט כל מילה באוצר.
-    final exact = word.length < _minFuzzyWordLength;
     final books = <int>{};
     for (var i = 0; i < _fuzzyVocabulary.length; i++) {
-      final vocabWord = _fuzzyVocabulary[i];
-      final matches = exact
-          ? vocabWord == word
-          : bookSearchWordPairMatches(word, vocabWord);
-      if (matches) books.addAll(_fuzzyVocabularyBooks[i]);
+      if (bookSearchWordPairMatches(word, _fuzzyVocabulary[i])) {
+        books.addAll(_fuzzyVocabularyBooks[i]);
+      }
     }
 
     if (_fuzzyWordCandidates.length >= _fuzzyWordCandidatesLimit) {

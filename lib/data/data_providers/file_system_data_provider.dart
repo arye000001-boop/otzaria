@@ -1,9 +1,9 @@
 import 'dart:io';
 import 'dart:isolate';
 import 'dart:convert';
+import 'dart:math' as math;
 import 'package:flutter/foundation.dart' show debugPrint, visibleForTesting;
 import 'package:otzaria/data/data_providers/book_composite_key.dart';
-import 'package:otzaria/data/data_providers/hive_data_provider.dart';
 import 'package:otzaria/data/data_providers/library_provider_manager.dart';
 import 'package:otzaria/settings/engine/app_settings_store.dart';
 import 'package:otzaria/models/book_source.dart';
@@ -17,6 +17,8 @@ import 'package:path/path.dart' as path;
 /// ספרי היברובוקס המקומיים, ומספר קובצי ה-PDF בתיקייה שלא זוהו כאלה.
 typedef LocalHebrewBooksScan = ({List<Book> books, int unrecognizedPdfCount});
 
+enum _MetadataRequest { reader, initialCatalog, catalogRefresh }
+
 /// A data provider that manages file system operations for the library.
 ///
 /// This class handles all file system related operations including:
@@ -28,8 +30,13 @@ typedef LocalHebrewBooksScan = ({List<Book> books, int unrecognizedPdfCount});
 class FileSystemData {
   late String libraryPath;
 
-  /// Future that resolves to metadata for all books and categories
-  late Future<Map<String, Map<String, dynamic>>> metadata;
+  ({String rootPath, Future<Map<String, Map<String, dynamic>>> result})?
+  _metadata;
+  Future<Map<String, Map<String, dynamic>>>? _readerMetadataLoad;
+
+  /// המטא־נתונים של הספרייה הנוכחית, נטענים לפי דרישה.
+  Future<Map<String, Map<String, dynamic>>> get metadata =>
+      _metadataFor(libraryPath, _MetadataRequest.reader);
 
   Future<Map<String, String>>? _titleToPath;
 
@@ -37,12 +44,10 @@ class FileSystemData {
   final LibraryProviderManager _providerManager =
       LibraryProviderManager.instance;
 
-  /// Creates a new instance of [FileSystemData] and starts loading metadata
-  /// and initializing the providers.
+  /// יוצר ספק קבצים ומתחיל לאתחל את ספקי הספרייה.
   FileSystemData() {
     libraryPath =
         Settings.getValue<String>(SettingsRepository.keyLibraryPath) ?? '.';
-    metadata = _getMetadata();
     _initializeProviders();
   }
 
@@ -64,7 +69,8 @@ class FileSystemData {
 
   Future<Map<String, String>> _getTitleToPath() async {
     await _providerManager.initialize();
-    final keyToPath = await _providerManager.fileSystemProvider.keyToPath;
+    final keyToPath =
+        await _providerManager.fileSystemProvider.physicalKeyToPath;
     final dbKeys = await _providerManager.databaseProvider
         .getDatabaseOnlyBookTitles();
     return buildTitleToPathMap(
@@ -147,24 +153,24 @@ class FileSystemData {
     return _providerManager.isUserBookContentInDb(title, categoryId, fileType);
   }
 
-  /// Clears the book-in-database cache
+  /// מנקה מטמונים התלויים בתוכן הספרייה.
   void clearBookCache() {
     _providerManager.clearCaches();
     _titleToPath = null;
+    _metadata = null;
+    _readerMetadataLoad = null;
     debugPrint('Book cache cleared');
   }
 
-  /// Retrieves the complete library structure from the file system.
-  ///
-  /// Reads the library from the configured path and combines it with metadata
-  /// to create a full [Library] object containing all categories and books.
-  /// Uses LibraryProviderManager for unified catalog building.
-  Future<Library> getLibrary() async {
+  /// בונה קטלוג עם קריאת מטא־נתונים חדשה. בטעינה ראשונית בלבד,
+  /// [sharePendingReaderMetadata] מאפשר להצטרף לקריאה ממתינה של הקורא.
+  Future<Library> getLibrary({bool sharePendingReaderMetadata = false}) async {
     final tTotal = DateTime.now();
-    final libraryDir = Directory(libraryPath);
+    final rootPath = libraryPath;
+    final libraryDir = Directory(rootPath);
 
     if (!libraryDir.existsSync()) {
-      debugPrint('Library path does not exist: $libraryPath');
+      debugPrint('Library path does not exist: $rootPath');
       return Library(categories: []);
     }
 
@@ -175,18 +181,21 @@ class FileSystemData {
 
     // בדיקה שתיקיית הספרים קיימת
     final otzariaPath = folderName.isEmpty
-        ? libraryPath
-        : path.join(libraryPath, folderName);
+        ? rootPath
+        : path.join(rootPath, folderName);
     final otzariaDir = Directory(otzariaPath);
     if (!otzariaDir.existsSync()) {
       debugPrint('Books directory does not exist: $otzariaPath');
       return Library(categories: []);
     }
 
-    // OPTIMIZATION: Load metadata and initialize providers in parallel
-    metadata = _getMetadata();
     final (metadataResult, _) = await (
-      metadata,
+      _metadataFor(
+        rootPath,
+        sharePendingReaderMetadata
+            ? _MetadataRequest.initialCatalog
+            : _MetadataRequest.catalogRefresh,
+      ),
       _providerManager.initialize(),
     ).wait;
     debugPrint(
@@ -360,21 +369,47 @@ class FileSystemData {
       return const {};
     }
     final roots = [hebrewBooksPath, path.join(hebrewBooksPath, 'Books')];
-    final pdfFiles = <String, String>{};
-    try {
-      for (final id in ids) {
+    final requested = ids.toList(growable: false);
+    var firstFailedIndex = requested.length;
+    Future<({Map<String, String> files, (Object, StackTrace)? failure})> probe(
+      int index,
+    ) async {
+      final id = requested[index];
+      final files = <String, String>{};
+      try {
         for (final name in ['$id.pdf', 'hebrewbooks_org_$id.pdf']) {
           for (final root in roots) {
+            if (index > firstFailedIndex) return (files: files, failure: null);
             final file = File(path.join(root, name));
             if (await file.exists()) {
-              pdfFiles.putIfAbsent(name, () => file.path);
+              files[name] = file.path;
               break;
             }
           }
         }
+      } catch (error, stackTrace) {
+        firstFailedIndex = math.min(firstFailedIndex, index);
+        // תוצאה מאוחרת עשויה להגיע אחרי שהבקשה כבר חזרה.
+        return (files: files, failure: (error, stackTrace));
       }
-    } on FileSystemException {
-      // כונן לא זמין - מחזירים את מה שנמצא עד כה.
+      return (files: files, failure: null);
+    }
+
+    const batchSize = 8;
+    final pdfFiles = <String, String>{};
+    for (var start = 0; start < requested.length; start += batchSize) {
+      final end = math.min(start + batchSize, requested.length);
+      final batch = [
+        for (var index = start; index < end; index++) probe(index),
+      ];
+      for (final pending in batch) {
+        final (:files, :failure) = await pending;
+        pdfFiles.addAll(files);
+        if (failure case (final error, final stackTrace)) {
+          if (error is FileSystemException) return pdfFiles;
+          Error.throwWithStackTrace(error, stackTrace);
+        }
+      }
     }
     return pdfFiles;
   }
@@ -460,30 +495,48 @@ class FileSystemData {
     await _providerManager.fileSystemProvider.saveBookText(title, content);
   }
 
-  /// Loads and parses the metadata for all books in the library.
-  ///
-  /// Reads metadata from a JSON file and creates a structured mapping of
-  /// book titles to their metadata information.
-  Future<Map<String, Map<String, dynamic>>> _getMetadata() async {
-    if (!Settings.isInitialized) {
-      await Settings.init(cacheProvider: HiveCache());
+  Future<Map<String, Map<String, dynamic>>> _metadataFor(
+    String rootPath,
+    _MetadataRequest request,
+  ) {
+    final cached = _metadata;
+    final readerLoad = _readerMetadataLoad;
+    final forReader = request == _MetadataRequest.reader;
+    if (!forReader) _readerMetadataLoad = null;
+    if (cached != null &&
+        cached.rootPath == rootPath &&
+        (forReader ||
+            (request == _MetadataRequest.initialCatalog &&
+                identical(cached.result, readerLoad)))) {
+      return cached.result;
     }
-    String metadataString = '';
-    Map<String, Map<String, dynamic>> metadata = {};
+
+    late final Future<Map<String, Map<String, dynamic>>> load;
+    load = _readMetadata(rootPath).whenComplete(() {
+      if (identical(_readerMetadataLoad, load)) _readerMetadataLoad = null;
+    });
+    _metadata = (rootPath: rootPath, result: load);
+    if (forReader) _readerMetadataLoad = load;
+    return load;
+  }
+
+  static Future<Map<String, Map<String, dynamic>>> _readMetadata(
+    String rootPath,
+  ) async {
+    final String metadataString;
     try {
-      File file = File(
-        '${Settings.getValue<String>(SettingsRepository.keyLibraryPath) ?? '.'}${Platform.pathSeparator}metadata.json',
-      );
-      metadataString = await file.readAsString();
+      metadataString = await File(
+        path.join(rootPath, 'metadata.json'),
+      ).readAsString();
     } catch (e) {
       return {};
     }
-    final tempMetadata = await Isolate.run(
-      () => jsonDecode(metadataString) as List,
-    );
+    return Isolate.run(() => _parseMetadata(metadataString));
+  }
 
-    for (int i = 0; i < tempMetadata.length; i++) {
-      final row = tempMetadata[i] as Map<String, dynamic>;
+  static Map<String, Map<String, dynamic>> _parseMetadata(String json) {
+    final metadata = <String, Map<String, dynamic>>{};
+    for (final row in (jsonDecode(json) as List).cast<Map<String, dynamic>>()) {
       metadata[row['title'].replaceAll('"', '')] = {
         'author': row['author'] ?? '',
         'heCategories': row['heCategories'] is List

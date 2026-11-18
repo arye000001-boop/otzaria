@@ -11,6 +11,7 @@ import 'package:otzaria/history/bloc/history_event.dart';
 import 'package:otzaria/history/bloc/history_state.dart';
 import 'package:otzaria/models/books.dart';
 import 'package:otzaria/models/pdf_headings.dart';
+import 'package:otzaria/navigation/bloc/navigation_bloc.dart';
 import 'package:otzaria/pdf_book/view/pdf_commentators_tab_screen.dart';
 import 'package:otzaria/personal_notes/bloc/personal_notes_bloc.dart';
 import 'package:otzaria/personal_notes/bloc/personal_notes_event.dart';
@@ -24,11 +25,14 @@ import 'package:otzaria/tabs/models/pdf_commentators_tab.dart';
 import 'package:otzaria/tabs/models/pdf_tab.dart';
 import 'package:otzaria/tabs/models/tab.dart';
 import 'package:otzaria/tabs/reading_screen.dart';
+import 'package:otzaria/tabs/utils/trackpad_tab_swipe_recognizer.dart';
 import 'package:otzaria/tabs/tabs_repository.dart';
+import 'package:otzaria/tabs/utils/tab_swipe_log.dart';
 import 'package:provider/provider.dart';
 
 import '../helpers/memory_settings_cache.dart';
 import '../test_helpers/stub_settings_bloc.dart';
+import '../test_helpers/stub_navigation_bloc.dart';
 
 /// אימות התנהגותי של `MoveTab` על ה-`ReadingScreen` האמיתי: אחרי הזזה,
 /// ה-`State` של מסך הטאב חייב להיות *אותו מופע*. ב-PDF זה ההבדל בין
@@ -47,6 +51,7 @@ void main() {
     WidgetTester tester,
     List<OpenedTab> tabs, {
     int currentTabIndex = 0,
+    TextDirection textDirection = TextDirection.ltr,
   }) async {
     tester.view.physicalSize = const Size(1600, 900);
     tester.view.devicePixelRatio = 1.0;
@@ -66,6 +71,7 @@ void main() {
       MaterialApp(
         home: MultiBlocProvider(
           providers: [
+            BlocProvider<NavigationBloc>(create: (_) => StubNavigationBloc()),
             BlocProvider<SettingsBloc>.value(value: StubSettingsBloc()),
             BlocProvider<PersonalNotesBloc>.value(
               value: _FakePersonalNotesBloc(),
@@ -74,7 +80,10 @@ void main() {
             BlocProvider<HistoryBloc>.value(value: _FakeHistoryBloc()),
             Provider<FocusRepository>.value(value: FocusRepository()),
           ],
-          child: const ReadingScreen(),
+          child: Directionality(
+            textDirection: textDirection,
+            child: const ReadingScreen(),
+          ),
         ),
       ),
     );
@@ -119,7 +128,7 @@ void main() {
     expect(detectorFinder, findsOneWidget);
 
     final detector = tester.widget<RawGestureDetector>(detectorFinder);
-    final factory = detector.gestures[HorizontalDragGestureRecognizer];
+    final factory = detector.gestures[TrackpadTabSwipeRecognizer];
     expect(factory, isNotNull);
 
     final recognizer =
@@ -397,6 +406,385 @@ void main() {
 
       expect(bloc.state.currentTabIndex, 1);
       expect(pageControllerOf(tester).page, 1);
+    });
+
+    group('שינוי בחירה או מבנה בזמן מחווה', () {
+      Future<TestGesture> startDrag(WidgetTester tester) async {
+        final center = tester.getCenter(find.byType(PageView));
+        final gesture = await tester.createGesture(
+          kind: PointerDeviceKind.trackpad,
+        );
+        await gesture.panZoomStart(center, timeStamp: Duration.zero);
+        await gesture.panZoomUpdate(
+          center,
+          pan: const Offset(-100, 0),
+          timeStamp: const Duration(milliseconds: 50),
+        );
+        await tester.pump();
+        return gesture;
+      }
+
+      Future<void> releaseDrag(WidgetTester tester, TestGesture gesture) async {
+        final center = tester.getCenter(find.byType(PageView));
+        await gesture.panZoomUpdate(
+          center,
+          pan: const Offset(-250, 0),
+          timeStamp: const Duration(milliseconds: 350),
+        );
+        await gesture.panZoomEnd(timeStamp: const Duration(milliseconds: 400));
+        await tester.pumpAndSettle();
+        await tester.pump(const Duration(milliseconds: 400));
+      }
+
+      for (final action in ['בחירה', 'הזזה', 'סגירה', 'החלפה', 'הלוך וחזור']) {
+        testWidgets('$action בזמן גרירה נשמרת גם אחרי המשך ושחרור', (
+          tester,
+        ) async {
+          final tabs = [for (final t in 'אבגדהוז'.split('')) _tab(t)];
+          final replacement = _tab('ח');
+          addTearDown(() {
+            for (final tab in [...tabs, replacement]) {
+              tab.dispose();
+            }
+          });
+          final bloc = await pumpReadingScreen(
+            tester,
+            tabs,
+            currentTabIndex: 3,
+          );
+          final gesture = await startDrag(tester);
+          final event = switch (action) {
+            'בחירה' || 'הלוך וחזור' => const SetCurrentTab(6),
+            'הזזה' => MoveTab(tabs[0], 6),
+            'סגירה' => RemoveTab(tabs[0]),
+            _ => ReplaceTab(oldTab: tabs[3], newTab: replacement),
+          };
+          bloc.add(event);
+          if (action == 'הלוך וחזור') bloc.add(const SetCurrentTab(3));
+          await tester.pump();
+          await tester.pump();
+          final expectedIndex = switch (action) {
+            'בחירה' || 'הזזה' => 6,
+            'סגירה' => 2,
+            _ => 3,
+          };
+          final selected = bloc.state.currentTab;
+          expect(bloc.state.currentTabIndex, expectedIndex);
+          expect(pageControllerOf(tester).page, expectedIndex);
+
+          await releaseDrag(tester, gesture);
+          expect(bloc.state.currentTab, same(selected));
+          expect(bloc.state.currentTabIndex, expectedIndex);
+          expect(pageControllerOf(tester).page, expectedIndex);
+          expect(TabSwipeLog.of(bloc), isEmpty);
+        });
+      }
+
+      testWidgets('סגירת כל הטאבים בזמן גרירה מסיימת את המחווה בבטחה', (
+        tester,
+      ) async {
+        final tabs = [_tab('א'), _tab('ב')];
+        addTearDown(() {
+          for (final tab in tabs) {
+            tab.dispose();
+          }
+        });
+        final bloc = await pumpReadingScreen(tester, tabs);
+        final gesture = await startDrag(tester);
+        bloc.add(CloseAllTabs());
+        await tester.pumpAndSettle();
+        await gesture.panZoomEnd(timeStamp: const Duration(milliseconds: 400));
+        await tester.pumpAndSettle();
+        expect(bloc.state.tabs, isEmpty);
+        expect(find.byType(PageView), findsNothing);
+        expect(tester.takeException(), isNull);
+        await tester.pump(const Duration(milliseconds: 400));
+      });
+
+      testWidgets('בחירה באמצע התיישבות מבטלת אותה ומאפשרת הנפה חדשה', (
+        tester,
+      ) async {
+        final tabs = [for (final t in 'אבגדהוז'.split('')) _tab(t)];
+        addTearDown(() {
+          for (final tab in tabs) {
+            tab.dispose();
+          }
+        });
+        final bloc = await pumpReadingScreen(tester, tabs, currentTabIndex: 3);
+        Future<void> fling() async {
+          final center = tester.getCenter(find.byType(PageView));
+          final gesture = await tester.createGesture(
+            kind: PointerDeviceKind.trackpad,
+          );
+          await gesture.panZoomStart(center, timeStamp: Duration.zero);
+          for (var i = 1; i <= 5; i++) {
+            await gesture.panZoomUpdate(
+              center,
+              pan: Offset(-30.0 * i, 0),
+              timeStamp: Duration(milliseconds: i * 10),
+            );
+            await tester.pump(const Duration(milliseconds: 10));
+          }
+          await gesture.panZoomEnd(timeStamp: const Duration(milliseconds: 60));
+        }
+
+        await fling();
+        await tester.pump(const Duration(milliseconds: 32));
+        expect(bloc.state.currentTabIndex, 4);
+        expect(pageControllerOf(tester).page, lessThan(4));
+        bloc.add(const SetCurrentTab(5));
+        await tester.pump();
+        await tester.pump();
+        expect(pageControllerOf(tester).page, 5);
+        await fling();
+        await tester.pumpAndSettle();
+        expect(bloc.state.currentTabIndex, 6);
+        expect(pageControllerOf(tester).page, 6);
+        expect(TabSwipeLog.of(bloc).last['from'], 5);
+        expect(TabSwipeLog.of(bloc).last['to'], 6);
+      });
+    });
+
+    // #5211: הנפה שנייה בתחילת אנימציית ההתיישבות של הראשונה נבלעה.
+    group('הנפה שנייה באמצע ההתיישבות', () {
+      Future<TabsBloc> pumpSeven(WidgetTester tester) {
+        final tabs = [for (final t in 'אבגדהוז'.split('')) _tab(t)];
+        addTearDown(() {
+          for (final t in tabs) {
+            t.dispose();
+          }
+        });
+        return pumpReadingScreen(tester, tabs, currentTabIndex: 3);
+      }
+
+      /// [sign] שלילי = קדימה (LTR בבדיקות).
+      Future<void> fling(WidgetTester tester, double sign, int steps) async {
+        final center = tester.getCenter(find.byType(PageView));
+        final gesture = await tester.createGesture(
+          kind: PointerDeviceKind.trackpad,
+        );
+        await gesture.panZoomStart(center, timeStamp: Duration.zero);
+        for (var i = 1; i <= steps; i++) {
+          await gesture.panZoomUpdate(
+            center,
+            pan: Offset(sign * 30.0 * i, 0),
+            timeStamp: Duration(milliseconds: 10 * i),
+          );
+          await tester.pump(const Duration(milliseconds: 10));
+        }
+        await gesture.panZoomEnd(
+          timeStamp: Duration(milliseconds: 10 * (steps + 1)),
+        );
+      }
+
+      Future<void> waitFrames(WidgetTester tester, int ms) async {
+        for (var t = 0; t < ms; t += 16) {
+          await tester.pump(const Duration(milliseconds: 16));
+        }
+      }
+
+      for (final forward in [true, false]) {
+        final direction = forward ? 'קדימה' : 'אחורה';
+        final sign = forward ? -1.0 : 1.0;
+        for (final delayMs in [0, 16, 32, 64, 96]) {
+          for (final steps in [5, 10]) {
+            testWidgets('$direction פעמיים, $delayMs ms, $steps צעדים', (
+              tester,
+            ) async {
+              final bloc = await pumpSeven(tester);
+              await fling(tester, sign, 5);
+              await waitFrames(tester, delayMs);
+              expect(bloc.state.currentTabIndex, forward ? 4 : 2);
+              await fling(tester, sign, steps);
+              await tester.pumpAndSettle();
+
+              expect(bloc.state.currentTabIndex, forward ? 5 : 1);
+              expect(pageControllerOf(tester).page, forward ? 5 : 1);
+            });
+
+            testWidgets('$direction ואז חזרה, $delayMs ms, $steps צעדים', (
+              tester,
+            ) async {
+              final bloc = await pumpSeven(tester);
+              await fling(tester, sign, 5);
+              await waitFrames(tester, delayMs);
+              await fling(tester, -sign, steps);
+              await tester.pumpAndSettle();
+
+              expect(bloc.state.currentTabIndex, 3);
+              expect(pageControllerOf(tester).page, 3);
+            });
+          }
+        }
+      }
+    });
+
+    group('כיוונים, מרחק מינימלי וגלילה אנכית (#3946)', () {
+      Future<TabsBloc> pumpMiddle(
+        WidgetTester tester, {
+        TextDirection textDirection = TextDirection.ltr,
+      }) {
+        final tabs = [for (final t in 'אבגדה'.split('')) _tab(t)];
+        addTearDown(() {
+          for (final t in tabs) {
+            t.dispose();
+          }
+        });
+        return pumpReadingScreen(
+          tester,
+          tabs,
+          currentTabIndex: 2,
+          textDirection: textDirection,
+        );
+      }
+
+      /// [pans] - ה-pan המצטבר בכל עדכון, כל 10ms. [hold] עוצר לפני השחרור.
+      Future<void> pan(
+        WidgetTester tester,
+        List<Offset> pans, {
+        bool hold = false,
+      }) async {
+        final center = tester.getCenter(find.byType(PageView));
+        final gesture = await tester.createGesture(
+          kind: PointerDeviceKind.trackpad,
+        );
+        await gesture.panZoomStart(center, timeStamp: Duration.zero);
+        var ms = 0;
+        for (final offset in pans) {
+          ms += 10;
+          await gesture.panZoomUpdate(
+            center,
+            pan: offset,
+            timeStamp: Duration(milliseconds: ms),
+          );
+          await tester.pump(const Duration(milliseconds: 10));
+        }
+        if (hold) {
+          for (final wait in [250, 50]) {
+            ms += wait;
+            await gesture.panZoomUpdate(
+              center,
+              pan: pans.last,
+              timeStamp: Duration(milliseconds: ms),
+            );
+          }
+        }
+        await gesture.panZoomEnd(timeStamp: Duration(milliseconds: ms + 10));
+      }
+
+      List<Offset> slowDrag(double dx) => [
+        for (var i = 1; i <= 10; i++) Offset(dx * i / 10, 0),
+      ];
+      List<Offset> fling(double dx) => [
+        for (var i = 1; i <= 5; i++) Offset(dx * i / 5, 0),
+      ];
+
+      void expectTab(WidgetTester tester, TabsBloc bloc, int index) {
+        expect(bloc.state.currentTabIndex, index);
+        expect(pageControllerOf(tester).page, index);
+      }
+
+      for (final rtl in [true, false]) {
+        final textDirection = rtl ? TextDirection.rtl : TextDirection.ltr;
+        // ב-RTL גרירה ימינה (dx חיובי) מתקדמת טאב, ב-LTR שמאלה.
+        final forward = rtl ? 1.0 : -1.0;
+        final name = rtl ? 'RTL' : 'LTR';
+
+        testWidgets('$name: גרירה איטית לשני הכיוונים ובחזרה', (tester) async {
+          final bloc = await pumpMiddle(tester, textDirection: textDirection);
+          await pan(tester, slowDrag(900 * forward), hold: true);
+          await tester.pumpAndSettle();
+          expectTab(tester, bloc, 3);
+          await pan(tester, slowDrag(-900 * forward), hold: true);
+          await tester.pumpAndSettle();
+          expectTab(tester, bloc, 2);
+          await pan(tester, slowDrag(-900 * forward), hold: true);
+          await tester.pumpAndSettle();
+          expectTab(tester, bloc, 1);
+        });
+
+        testWidgets('$name: היפוך כיוון באמצע ההתיישבות', (tester) async {
+          final bloc = await pumpMiddle(tester, textDirection: textDirection);
+          await pan(tester, slowDrag(900 * forward), hold: true);
+          await tester.pump(const Duration(milliseconds: 32));
+          expect(bloc.state.currentTabIndex, 3);
+          await pan(tester, slowDrag(-900 * forward), hold: true);
+          await tester.pumpAndSettle();
+          expectTab(tester, bloc, 2);
+        });
+
+        testWidgets('$name: הנפה לשני הכיוונים', (tester) async {
+          final bloc = await pumpMiddle(tester, textDirection: textDirection);
+          await pan(tester, fling(150 * forward));
+          await tester.pumpAndSettle();
+          expectTab(tester, bloc, 3);
+          await pan(tester, fling(-150 * forward));
+          await tester.pumpAndSettle();
+          expectTab(tester, bloc, 2);
+          await pan(tester, fling(-150 * forward));
+          await tester.pumpAndSettle();
+          expectTab(tester, bloc, 1);
+        });
+
+        testWidgets('$name: הנפה קצרה מהמרחק המינימלי נשארת בטאב', (
+          tester,
+        ) async {
+          final bloc = await pumpMiddle(tester, textDirection: textDirection);
+          for (final sign in [forward, -forward]) {
+            await pan(tester, [
+              for (var i = 1; i <= 3; i++) Offset(sign * 12.0 * i, 0),
+            ]);
+            await tester.pumpAndSettle();
+            expectTab(tester, bloc, 2);
+          }
+        });
+
+        testWidgets('$name: גלילה אנכית שמתחילה בסטייה אופקית', (
+          tester,
+        ) async {
+          final bloc = await pumpMiddle(tester, textDirection: textDirection);
+          for (final sign in [forward, -forward]) {
+            await pan(tester, [
+              Offset(sign * 30, -2),
+              Offset(sign * 50, -80),
+              Offset(sign * 65, -180),
+              Offset(sign * 80, -300),
+            ]);
+            await tester.pumpAndSettle();
+            expectTab(tester, bloc, 2);
+          }
+        });
+      }
+    });
+
+    testWidgets('ההחלקה האחרונה נשמרת לדיווח של החלון', (tester) async {
+      final tabs = [_tab('א'), _tab('ב')];
+      addTearDown(() {
+        for (final t in tabs) {
+          t.dispose();
+        }
+      });
+      final bloc = await pumpReadingScreen(tester, tabs);
+      final center = tester.getCenter(find.byType(PageView));
+      final gesture = await tester.createGesture(
+        kind: PointerDeviceKind.trackpad,
+      );
+      await gesture.panZoomStart(center, timeStamp: Duration.zero);
+      for (var i = 1; i <= 5; i++) {
+        await gesture.panZoomUpdate(
+          center,
+          pan: Offset(-30.0 * i, 0),
+          timeStamp: Duration(milliseconds: 10 * i),
+        );
+      }
+      await gesture.panZoomEnd(timeStamp: const Duration(milliseconds: 60));
+      await tester.pumpAndSettle();
+
+      final swipe = TabSwipeLog.of(bloc).single;
+      expect(swipe['kind'], 'trackpad');
+      expect(swipe['from'], 0);
+      expect(swipe['to'], 1);
+      expect(swipe['dx'], -150);
     });
   });
 

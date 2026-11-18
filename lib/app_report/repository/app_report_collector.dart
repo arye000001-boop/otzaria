@@ -8,6 +8,7 @@ import 'package:flutter/foundation.dart';
 import 'package:otzaria/settings/engine/app_settings_store.dart';
 import 'package:otzaria/app_report/repository/error_log_blocks.dart';
 import 'package:otzaria/app_report/services/input_focus_diagnostics.dart';
+import 'package:otzaria/app_report/services/recent_book_opens.dart';
 import 'package:otzaria/core/app_paths.dart';
 import 'package:otzaria/core/diagnostics/developer_diagnostics.dart';
 import 'package:otzaria/core/diagnostics/memory_info.dart';
@@ -19,6 +20,7 @@ import 'package:otzaria/core/info/os_version.dart';
 import 'package:otzaria/core/startup_timeline.dart';
 import 'package:otzaria/plugins/repository/plugin_registry_repository.dart';
 import 'package:otzaria/plugins/services/webview2_creation_diagnostics.dart';
+import 'package:otzaria/search/active_lexical_searches.dart';
 import 'package:otzaria/settings/engine/settings_repository.dart';
 import 'package:otzaria/theme/app_fonts.dart';
 import 'package:otzaria_report_contract/otzaria_report_contract.dart';
@@ -42,11 +44,14 @@ class AppReportCollector {
     AppReportRedactor? redactor,
     this._appInfoLoader,
     this._currentContext,
+    this._searchResults,
     this._includeCurrentContext = true,
     this._errorLogPath,
     this._shutdownLogPath,
+    Future<Map<String, dynamic>?> Function()? previousRunContext,
     DateTime Function()? clock,
-  }) : _redactor = redactor ?? AppReportRedactor.fromPlatform(),
+  }) : _previousRunContext = previousRunContext ?? _noPreviousRunContext,
+       _redactor = redactor ?? AppReportRedactor.fromPlatform(),
        _clock = clock ?? DateTime.now;
 
   /// טווח הזמן של רשומות הלוג שנכנסות לדיווח.
@@ -60,9 +65,15 @@ class AppReportCollector {
   final AppReportRedactor _redactor;
   final Future<Map<String, dynamic>> Function()? _appInfoLoader;
   final Map<String, Object?> Function()? _currentContext;
+  final Map<String, Object?>? Function()? _searchResults;
 
   /// `false` בדיווח על קריסה מהפעלה קודמת: החלון הנוכחי אינו מה שהיה פתוח בה.
   final bool _includeCurrentContext;
+
+  /// בדוח על ההפעלה הקודמת: מה שהיא הציגה וחיפשה, לפי התמונה ששמרה.
+  final Future<Map<String, dynamic>?> Function() _previousRunContext;
+
+  static Future<Map<String, dynamic>?> _noPreviousRunContext() async => null;
 
   @visibleForTesting
   bool get includesCurrentContext => _includeCurrentContext;
@@ -88,6 +99,15 @@ class AppReportCollector {
     final currentContext = _includeCurrentContext
         ? _currentContext ?? DeveloperDiagnostics.instance.contextProvider
         : null;
+    final previousRun = _includeCurrentContext
+        ? null
+        : await _guard(
+            'previousRunContext',
+            () async => await _previousRunContext() ?? const {},
+          );
+    final searchResults = _includeCurrentContext
+        ? _searchResultsOrError()
+        : null;
     final diagnostics = <String, dynamic>{
       'collectedAt': _clock().toUtc().toIso8601String(),
       'appInfo': await _guard('appInfo', _loadAppInfo),
@@ -108,10 +128,23 @@ class AppReportCollector {
           () async => Map<String, dynamic>.from(currentContext()),
         ),
       if (_includeCurrentContext)
+        'recentBookOpens': await _guard(
+          'recentBookOpens',
+          () async => RecentBookOpens.instance.collect(),
+        ),
+      if (_includeCurrentContext)
         'inputFocus': await _guard(
           'inputFocus',
           () async => InputFocusDiagnostics.instance.collect(),
         ),
+      if (_includeCurrentContext)
+        'searches': await _guard(
+          'searches',
+          () async => ActiveLexicalSearches.instance.collect(),
+        ),
+      if (previousRun != null && previousRun.isNotEmpty)
+        'previousRun': previousRun,
+      'searchResults': ?searchResults,
     };
     return _redact(diagnostics);
   }
@@ -268,6 +301,21 @@ class AppReportCollector {
             AppFonts.defaultCommentatorsFont,
       },
     };
+  }
+
+  /// null מחוץ ללשונית חיפוש.
+  Map<String, dynamic>? _searchResultsOrError() {
+    try {
+      final results =
+          (_searchResults ??
+                  DeveloperDiagnostics.instance.searchResultsProvider)
+              ?.call();
+      return results == null ? null : Map<String, dynamic>.from(results);
+    } catch (error) {
+      debugPrint('AppReportCollector: searchResults failed: $error');
+      // ההודעה עלולה להכיל טקסט תוצאה, ולכן רק הסוג.
+      return {'error': error.runtimeType.toString()};
+    }
   }
 
   static Future<Map<String, dynamic>> _guard(

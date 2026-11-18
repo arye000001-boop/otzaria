@@ -3,6 +3,7 @@ import 'package:otzaria/data/data_providers/database_library_provider.dart';
 import 'dart:async';
 
 import 'package:equatable/equatable.dart';
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:otzaria/settings/engine/app_settings_store.dart';
 import 'package:otzaria/core/messages/settings_messages.dart';
@@ -130,12 +131,15 @@ class CustomFoldersBloc extends Bloc<CustomFoldersEvent, CustomFoldersState> {
                   for (final (title, reason) in result.failedDetails)
                     '"$title": $reason',
                 ])
-              : 'כשל: ${result.failedBooks}';
+              : SettingsMessages.customFolderFailedCount(result.failedBooks);
           emit(
             state.copyWith(
               isSyncing: false,
               error: [
-                '${result.addedBooks} ספרים נוספו, ${result.updatedBooks} עודכנו',
+                SettingsMessages.customFolderBooksChanged(
+                  result.addedBooks,
+                  result.updatedBooks,
+                ),
                 if (failedMsg.isNotEmpty) failedMsg,
               ].join('\n'),
             ),
@@ -145,8 +149,11 @@ class CustomFoldersBloc extends Bloc<CustomFoldersEvent, CustomFoldersState> {
             state.copyWith(
               isSyncing: false,
               message: result.hasChanges
-                  ? '${result.addedBooks} ספרים נוספו, ${result.updatedBooks} עודכנו'
-                  : 'התיקייה נוספה. לא נמצאו ספרים חדשים.',
+                  ? SettingsMessages.customFolderBooksChanged(
+                      result.addedBooks,
+                      result.updatedBooks,
+                    )
+                  : SettingsMessages.customFolderAddedNoNewBooks,
             ),
           );
         }
@@ -182,13 +189,13 @@ class CustomFoldersBloc extends Bloc<CustomFoldersEvent, CustomFoldersState> {
         emit(
           state.copyWith(
             isSyncing: false,
-            message: 'התיקייה והספרים הוסרו מהתוכנה.',
+            message: SettingsMessages.customFolderRemovedWithBooks,
           ),
         );
       } else {
         emit(
           state.copyWith(
-            message: 'התיקייה הוסרה. הספרים נשארו בתוכנה.',
+            message: SettingsMessages.customFolderRemovedKeptBooks,
           ),
         );
       }
@@ -264,12 +271,17 @@ class CustomFoldersBloc extends Bloc<CustomFoldersEvent, CustomFoldersState> {
         newFolders,
         onlyFolderPath: event.folder.path,
       );
+      final hasErrors = result.errors.isNotEmpty;
       if (!event.value) {
         emit(
           state.copyWith(
             isSyncing: false,
-            message:
-                'תוכן הספרים נסרק ועודכן.\nמעתה הספרים ייקראו ישירות מהקבצים.',
+            message: hasErrors
+                ? null
+                : SettingsMessages.customFolderContentRescanned,
+            error: hasErrors
+                ? SettingsMessages.customFolderScanErrors(result.errors)
+                : null,
           ),
         );
       } else {
@@ -277,9 +289,14 @@ class CustomFoldersBloc extends Bloc<CustomFoldersEvent, CustomFoldersState> {
         emit(
           state.copyWith(
             isSyncing: false,
-            message: hasChanges
-                ? 'הסריקה הושלמה: ${result.addedBooks} ספרים נוספו, '
-                      '${result.updatedBooks} עודכנו'
+            message: !hasErrors && hasChanges
+                ? SettingsMessages.customFolderScanDone(
+                    result.addedBooks,
+                    result.updatedBooks,
+                  )
+                : null,
+            error: hasErrors
+                ? SettingsMessages.customFolderScanErrors(result.errors)
                 : null,
           ),
         );
@@ -287,8 +304,14 @@ class CustomFoldersBloc extends Bloc<CustomFoldersEvent, CustomFoldersState> {
       _refreshLibraryAfterScan({
         for (final id in result.updatedBookIds) BookIdentity.userBookKey(id),
       });
-    } catch (e) {
-      emit(state.copyWith(isSyncing: false, error: 'שגיאה בסנכרון: $e'));
+    } catch (e, stackTrace) {
+      debugPrint('⚠️ [CustomFoldersBloc] סנכרון תיקייה נכשל: $e\n$stackTrace');
+      emit(
+        state.copyWith(
+          isSyncing: false,
+          error: SettingsMessages.customFolderSyncFailed,
+        ),
+      );
     }
   }
 
@@ -316,11 +339,14 @@ class CustomFoldersBloc extends Bloc<CustomFoldersEvent, CustomFoldersState> {
               onlyFolderPath: event.onlyFolderPath,
             );
       final hasChanges = result.addedBooks > 0 || result.updatedBooks > 0;
-      final message = hasChanges
-          ? 'הסריקה הושלמה: ${result.addedBooks} ספרים נוספו, '
-                '${result.updatedBooks} עודכנו'
-          : event.showNoChangesMessage
-          ? 'הסריקה הושלמה. לא נמצאו ספרים חדשים.'
+      final hasErrors = result.errors.isNotEmpty;
+      final message = !hasErrors && hasChanges
+          ? SettingsMessages.customFolderScanDone(
+              result.addedBooks,
+              result.updatedBooks,
+            )
+          : !hasErrors && event.showNoChangesMessage
+          ? SettingsMessages.customFolderScanNoNewBooks
           : null;
       // הרענון נשלח לפני דיווח התוצאה, כדי שקורא שמחכה ל-completedScan לא
       // יראה "הסתיים" לפני ש-RefreshLibrary בכלל נכנס לתור.
@@ -337,6 +363,9 @@ class CustomFoldersBloc extends Bloc<CustomFoldersEvent, CustomFoldersState> {
         state.copyWith(
           isSyncing: false,
           message: message,
+          error: hasErrors && event.requestId == null
+              ? SettingsMessages.customFolderScanErrors(result.errors)
+              : null,
           completedScan: event.requestId == null
               ? null
               : CustomFoldersScanOutcome(
@@ -347,11 +376,14 @@ class CustomFoldersBloc extends Bloc<CustomFoldersEvent, CustomFoldersState> {
                 ),
         ),
       );
-    } catch (e) {
+    } catch (e, stackTrace) {
+      debugPrint('⚠️ [CustomFoldersBloc] סריקת תיקיות נכשלה: $e\n$stackTrace');
       emit(
         state.copyWith(
           isSyncing: false,
-          error: 'שגיאה בסריקת תיקיות אישיות: $e',
+          error: event.requestId == null
+              ? SettingsMessages.customFolderSyncFailed
+              : null,
           completedScan: event.requestId == null
               ? null
               : CustomFoldersScanOutcome(

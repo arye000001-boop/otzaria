@@ -25,6 +25,7 @@ import 'package:otzaria/text_book/bloc/text_book_event.dart';
 import 'package:otzaria/text_book/bloc/text_book_state.dart';
 import 'package:otzaria/search/models/search_configuration.dart';
 import 'package:otzaria/search/view/search_dialog.dart';
+import 'package:otzaria/app_report/view/app_report_dialog.dart';
 import 'package:otzaria/bookmarks/view/bookmark_screen.dart';
 import 'package:otzaria/bookmarks/view/save_group_bookmark_dialog.dart';
 import 'package:otzaria/history/view/history_screen.dart';
@@ -37,6 +38,7 @@ import 'package:otzaria/shortcuts/shortcut_validator.dart';
 import 'package:otzaria/utils/ui/fullscreen_helper.dart';
 import 'package:otzaria/settings/settings_exports.dart';
 import 'package:otzaria/plugins/services/plugin_runtime_dispatcher.dart';
+import 'package:otzaria/widgets/text/rtl_selection_shortcuts.dart';
 
 class KeyboardShortcuts extends StatefulWidget {
   final Widget child;
@@ -61,6 +63,9 @@ class _KeyboardShortcutsState extends State<KeyboardShortcuts> {
 
   /// המקש שהפעיל קיצור דינמי; החזרות שלו (מקש מוחזק) לא יגיעו לטיפול המובנה.
   PhysicalKeyboardKey? _dynamicKey;
+
+  /// החץ שהפעיל קיצור מתוך עץ הפוקוס; החזרות שלו לא יעבירו פוקוס.
+  PhysicalKeyboardKey? _arrowShortcutKey;
 
   @override
   void initState() {
@@ -124,6 +129,40 @@ class _KeyboardShortcutsState extends State<KeyboardShortcuts> {
         (event.logicalKey == LogicalKeyboardKey.keyD ||
             event.logicalKey == LogicalKeyboardKey.keyH);
   }
+
+  /// חץ בלי מקש צירוף, ומקש ששוחרר מאזור הקריאה, נבלעים בהעברת הפוקוס ובאזורי
+  /// הבחירה לפני ה-late handler, ולכן קיצור שהוקצה להם מופעל כאן.
+  KeyEventResult _handleArrowShortcut(FocusNode _, KeyEvent event) {
+    if (event is KeyRepeatEvent && event.physicalKey == _arrowShortcutKey) {
+      return KeyEventResult.handled;
+    }
+    if (event is! KeyRepeatEvent) _arrowShortcutKey = null;
+    final keyboard = HardwareKeyboard.instance;
+    if (event is! KeyDownEvent ||
+        !_isActiveWindow ||
+        ShortcutHelper.isEditingText ||
+        !(_focusArrows.any((arrow) => arrow.accepts(event, keyboard)) ||
+            (ShortcutValidator.isReleasedReaderKey(event) &&
+                !hasFocusedSelectableRegionSelection()))) {
+      return KeyEventResult.ignored;
+    }
+    final result = _handleKeyEvent(
+      event,
+      context.read<SettingsBloc>().state.shortcuts,
+    );
+    _arrowShortcutKey = result == KeyEventResult.handled
+        ? event.physicalKey
+        : null;
+    return result;
+  }
+
+  /// החיצים ש-WidgetsApp ממפה להעברת פוקוס.
+  static const _focusArrows = [
+    SingleActivator(LogicalKeyboardKey.arrowLeft),
+    SingleActivator(LogicalKeyboardKey.arrowRight),
+    SingleActivator(LogicalKeyboardKey.arrowUp),
+    SingleActivator(LogicalKeyboardKey.arrowDown),
+  ];
 
   /// בעריכת טקסט השדה קודם, והקיצור הדינמי נבדק רק ב-late handler.
   KeyEventResult _handleEarlyKeyEvent(KeyEvent event) {
@@ -217,6 +256,7 @@ class _KeyboardShortcutsState extends State<KeyboardShortcuts> {
     final advancedSearchShortcut = shortcutOf(
       ShortcutValidator.openAdvancedSearchKey,
     );
+    final appReportShortcut = shortcutOf(ShortcutValidator.openAppReportKey);
     final settingsShortcut = shortcutOf('key-shortcut-open-settings');
     final moreShortcut = shortcutOf('key-shortcut-open-more');
     final bookmarksShortcut = shortcutOf('key-shortcut-open-bookmarks');
@@ -380,6 +420,21 @@ class _KeyboardShortcutsState extends State<KeyboardShortcuts> {
       return KeyEventResult.handled;
     }
 
+    // בית הספרייה (אופציונלי, ללא ברירת מחדל) — מעבר לספרייה והפעלת פעולת
+    // הבית שלה, כמו לחיצה על כפתור הבית.
+    final libraryHomeShortcut = shortcutOf(
+      ShortcutValidator.openLibraryHomeKey,
+    );
+    if (libraryHomeShortcut.isNotEmpty &&
+        ShortcutHelper.matchesShortcut(event, libraryHomeShortcut)) {
+      if (!closeOverlayRoutes()) return KeyEventResult.handled;
+      context.read<NavigationBloc>().add(
+        const NavigateToScreen(Screen.library),
+      );
+      context.read<FocusRepository>().requestLibraryHome();
+      return KeyEventResult.handled;
+    }
+
     // איתור
     if (ShortcutHelper.matchesShortcut(event, findRefShortcut)) {
       widget.onFindRefRequested();
@@ -473,6 +528,13 @@ class _KeyboardShortcutsState extends State<KeyboardShortcuts> {
           initialSearchMode: SearchMode.advanced,
         ),
       );
+      return KeyEventResult.handled;
+    }
+
+    if (appReportShortcut.isNotEmpty &&
+        ShortcutHelper.matchesShortcut(event, appReportShortcut)) {
+      if (!closeOverlayRoutes()) return KeyEventResult.handled;
+      showAppReportDialog(context);
       return KeyEventResult.handled;
     }
 
@@ -645,6 +707,7 @@ class _KeyboardShortcutsState extends State<KeyboardShortcuts> {
     return FocusScope(
       node: _shortcutFocusScopeNode,
       autofocus: true,
+      onKeyEvent: _handleArrowShortcut,
       child: widget.child,
     );
   }

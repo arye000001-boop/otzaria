@@ -167,11 +167,14 @@ class ExternalLinkRepository {
     if (source.isUser) return const [];
     try {
       if (_withExternalLinks.isEmpty) return const [];
+      final forward = await _forwardBookRows(title, categoryId, source);
       final links = [
-        for (final row in await _forwardBookRows(title, categoryId, source))
-          if (row.sourceLineIndex >= startLineIndex &&
-              row.sourceLineIndex <= endLineIndex)
-            _forwardLink(row),
+        for (final row in _forwardRowsInRange(
+          forward,
+          startLineIndex,
+          endLineIndex,
+        ))
+          _forwardLink(row),
         for (final row in await _reverseRows(
           title,
           categoryId,
@@ -185,6 +188,29 @@ class ExternalLinkRepository {
       if (isTransientExternalLinkLock(e)) rethrow;
       debugPrint('[ExternalLinks] "$title": $e');
       return const [];
+    }
+  }
+
+  static Iterable<ResolvedExternalLink> _forwardRowsInRange(
+    List<ResolvedExternalLink> rows,
+    int startLineIndex,
+    int endLineIndex,
+  ) sync* {
+    // השאילתה ממיינת לפי שורת מקור. מחפשים את תחילת הטווח, כולל כפילויות.
+    var low = 0;
+    var high = rows.length;
+    while (low < high) {
+      final middle = low + ((high - low) >> 1);
+      if (rows[middle].sourceLineIndex < startLineIndex) {
+        low = middle + 1;
+      } else {
+        high = middle;
+      }
+    }
+    for (var i = low; i < rows.length; i++) {
+      final row = rows[i];
+      if (row.sourceLineIndex > endLineIndex) break;
+      yield row;
     }
   }
 
@@ -204,7 +230,7 @@ class ExternalLinkRepository {
     index1: row.targetLineIndex + 1,
     path2: row.sourceTitle,
     index2: row.sourceLineIndex + 1,
-    connectionType: inverseExternalConnectionType(row.connectionType),
+    connectionType: LinkTypes.inverse(row.connectionType),
     targetCategoryId: row.sourceCategoryId,
     targetBookId: row.sourceBookId,
     targetSource: BookSource.attached(row.sourceSlug),
@@ -241,7 +267,7 @@ class ExternalLinkRepository {
       for (final row in await _reverseRows(title, categoryId, source)) {
         add(
           row.sourceTitle,
-          inverseExternalConnectionType(row.connectionType),
+          LinkTypes.inverse(row.connectionType),
           BookSource.attached(row.sourceSlug),
           row.targetLineIndex,
         );

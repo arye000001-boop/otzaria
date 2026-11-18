@@ -49,6 +49,29 @@ Map<int, List<Link>> buildLinksByLineMap(List<Link> links) {
   return _LinksByLineMap(links);
 }
 
+/// מסנן וממיין מפרשים לשורות [indexes] (מבוססות אפס), בעזרת אינדקס הקישורים.
+Future<List<Link>> getCommentaryLinksForLines({
+  required List<int> indexes,
+  required List<Link> links,
+  required Map<int, List<Link>> linksByLine,
+  required List<String> commentatorsToShow,
+  Set<String> typesToShow = const {},
+}) {
+  final candidates =
+      commentatorsToShow.isNotEmpty &&
+          indexes.length < links.length &&
+          linksByLine is _LinksByLineMap &&
+          identical(linksByLine._sourceLinks, links)
+      ? linksByLine._linksForLines(indexes)
+      : links;
+  return getLinksforIndexs(
+    indexes: indexes,
+    links: candidates,
+    commentatorsToShow: commentatorsToShow,
+    typesToShow: typesToShow,
+  );
+}
+
 typedef _OrderedLink = ({Link link, int order});
 
 class _RangeNode {
@@ -66,11 +89,12 @@ class _RangeNode {
 }
 
 class _LinksByLineMap extends MapBase<int, List<Link>> {
+  final List<Link> _sourceLinks;
   final Map<int, List<_OrderedLink>> _starts = {};
   final List<_OrderedLink> _ranged = [];
   late final _RangeNode? _ranges;
 
-  _LinksByLineMap(List<Link> links) {
+  _LinksByLineMap(List<Link> links) : _sourceLinks = links {
     for (var i = 0; i < links.length; i++) {
       final item = (link: links[i], order: i);
       _starts.putIfAbsent(links[i].index1, () => []).add(item);
@@ -92,27 +116,68 @@ class _LinksByLineMap extends MapBase<int, List<Link>> {
     );
   }
 
-  void _collect(_RangeNode? node, int line, List<_OrderedLink> result) {
+  void _collect(
+    _RangeNode? node,
+    int line,
+    void Function(_OrderedLink) add,
+  ) {
     if (node == null || node.maxEnd < line) return;
-    if (node.left != null) _collect(node.left, line, result);
+    if (node.left != null) _collect(node.left, line, add);
     final link = node.value.link;
     if (link.index1 < line && link.index1End! >= line) {
-      result.add(node.value);
+      add(node.value);
     }
-    if (link.index1 < line) _collect(node.right, line, result);
+    if (link.index1 < line) _collect(node.right, line, add);
   }
 
-  // כל גלילה שואלת שוב על אותן שורות; המפה קבועה, ולכן התשובה נשמרת.
-  final Map<int, List<Link>?> _memo = {};
+  List<Link> _linksForLines(List<int> indexes) {
+    final distinctIndexes = indexes.toSet();
+    // כל שורה עלולה לבקר בכל הטווחים; כשהחסם מגיע לגודל הרשימה, סורקים אותה.
+    if (_ranged.length * distinctIndexes.length >= _sourceLinks.length) {
+      return _sourceLinks;
+    }
+
+    // המיקום ברשימת המקור מבדיל כפילויות אמיתיות מחפיפה של טווח לכמה שורות.
+    final byOrder = <int, Link>{};
+    void add(_OrderedLink item) {
+      byOrder[item.order] = item.link;
+    }
+
+    for (final index in distinctIndexes) {
+      final line = index + 1;
+      for (final item in _starts[line] ?? const <_OrderedLink>[]) {
+        add(item);
+      }
+      _collect(_ranges, line, add);
+    }
+    final orders = byOrder.keys.toList()..sort();
+    return [for (final order in orders) byOrder[order]!];
+  }
+
+  // התקרה מגבילה שורות שנשאלו, כולל תוצאות ריקות; מספר הקישורים בכל שורה משתנה.
+  static const _maxMemoizedLines = 512;
+  final _memo = <int, List<Link>?>{};
 
   @override
-  List<Link>? operator [](Object? key) =>
-      key is int ? _memo.putIfAbsent(key, () => _lookup(key)) : null;
+  List<Link>? operator [](Object? key) {
+    if (key is! int) return null;
+    if (_memo.containsKey(key)) {
+      final cached = _memo.remove(key);
+      _memo[key] = cached;
+      return cached;
+    }
+    final result = _lookup(key);
+    _memo[key] = result;
+    if (_memo.length > _maxMemoizedLines) {
+      _memo.remove(_memo.keys.first);
+    }
+    return result;
+  }
 
   List<Link>? _lookup(int key) {
     final found = <_OrderedLink>[...?_starts[key]];
     if (_ranges != null) {
-      _collect(_ranges, key, found);
+      _collect(_ranges, key, found.add);
       found.sort((a, b) => a.order.compareTo(b.order));
     }
     if (found.isEmpty) return null;

@@ -1,8 +1,11 @@
+import 'package:otzaria/core/download_http_client.dart';
+import 'package:otzaria/core/download_network_policy.dart';
 import 'dart:convert';
 import 'dart:io';
 
 import 'package:http/http.dart' as http;
 import 'package:otzaria/core/app_paths.dart';
+import 'package:otzaria/tools/biographies/data/author_biography_links.dart';
 import 'package:otzaria/utils/http_redirect_download.dart';
 import 'package:path/path.dart' as p;
 
@@ -38,6 +41,7 @@ class BiographiesDownloader {
 
   final http.Client _client;
   final bool _ownsClient;
+  bool _disposed = false;
   final Future<String> Function() _destinationProvider;
 
   BiographiesDownloader({
@@ -49,6 +53,7 @@ class BiographiesDownloader {
            destinationProvider ?? AppPaths.getBiographiesPath;
 
   void dispose() {
+    _disposed = true;
     if (_ownsClient) _client.close();
   }
 
@@ -57,20 +62,68 @@ class BiographiesDownloader {
   ///
   /// מחזיר `true` אם בסוף הפעולה קיים קובץ מקומי (כולל קובץ ישן כשאין
   /// רשת). לעולם אינו זורק.
-  Future<bool> ensureLatest({bool force = false}) async {
+  Future<bool> ensureLatest({
+    bool force = false,
+    void Function()? checkCancelled,
+    void Function()? onWaitingForWifi,
+  }) async {
     final dest = await _destinationProvider();
     try {
       final release = await fetchLatestRelease();
       final installed = await installedTag();
       final hasFile = await File(dest).exists();
       if (!force && hasFile && installed == release.tag) return true;
-      await _download(release, dest);
+      await DownloadNetworkPolicy.instance.runResumable(
+        () => _download(release, dest),
+        checkCancelled: () {
+          if (_disposed) throw http.RequestAbortedException();
+          checkCancelled?.call();
+        },
+        onWaiting: onWaitingForWifi,
+      );
       await File(_versionPath(dest)).writeAsString(release.tag);
       await _deleteLegacyFile(dest);
       return true;
     } catch (_) {
       return File(dest).exists();
     }
+  }
+
+  /// Refreshes the optional author mapping even if the biography release did
+  /// not change. An invalid response leaves the installed copy in place.
+  Future<void> refreshAuthorLinks({
+    void Function()? checkCancelled,
+    void Function()? onWaitingForWifi,
+  }) async {
+    await DownloadNetworkPolicy.instance.runResumable(
+      () async {
+        checkCancelled?.call();
+        final response = await createDownloadClient(_client)
+            .get(Uri.parse(AuthorBiographyLinks.downloadUrl))
+            .timeout(_apiTimeout);
+        if (response.statusCode != 200) return;
+        final bytes = response.bodyBytes;
+        AuthorBiographyLinks.decode(utf8.decode(bytes));
+        final dir = Directory(p.dirname(await _destinationProvider()));
+        await dir.create(recursive: true);
+        final staging = await dir.createTemp('.author-biographies-');
+        try {
+          final file = File(
+            p.join(staging.path, AuthorBiographyLinks.fileName),
+          );
+          await file.writeAsBytes(bytes, flush: true);
+          checkCancelled?.call();
+          await file.rename(p.join(dir.path, AuthorBiographyLinks.fileName));
+        } finally {
+          await staging.delete(recursive: true);
+        }
+      },
+      checkCancelled: () {
+        if (_disposed) throw http.RequestAbortedException();
+        checkCancelled?.call();
+      },
+      onWaiting: onWaitingForWifi,
+    );
   }
 
   /// שולף את פרטי ה-release האחרון. זורק [Exception] בכשל.
@@ -113,7 +166,7 @@ class BiographiesDownloader {
   /// מוריד אל קובץ `.part` ומשנה שם אטומית, כדי שקובץ חלקי לא ייראה תקין.
   Future<void> _download(BiographiesRelease release, String dest) async {
     final response = await sendGetFollowingRedirects(
-      _client,
+      createDownloadClient(_client),
       release.downloadUrl,
     );
     if (response.statusCode < 200 || response.statusCode >= 300) {

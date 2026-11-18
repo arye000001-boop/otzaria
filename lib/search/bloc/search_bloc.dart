@@ -1,8 +1,10 @@
 import 'package:otzaria/data/book_identity.dart';
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:otzaria/search/active_lexical_searches.dart';
 import 'package:otzaria/search/bloc/search_event.dart';
 import 'package:otzaria/search/bloc/search_state.dart';
 import 'package:otzaria/search/models/search_completion.dart';
@@ -47,6 +49,8 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
 
   /// מזהה הביטול במנוע של החיפוש הנוכחי; חיפוש חדש או סגירה מבטלים אותו.
   int? _engineRequestId;
+
+  TrackedLexicalSearch? _tracked;
 
   /// תמונת האינדקס שנלכדה לפני הזרם של התוצאות המוצגות.
   String? _searchSnapshot;
@@ -233,6 +237,16 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
       ),
     );
 
+    final tracked = _tracked = ActiveLexicalSearches.instance.start(
+      _describeQuery(
+        query,
+        negativeQuery,
+        requestedFacets.length,
+        searchOptions: event.searchOptions,
+        alternativeWords: event.alternativeWords,
+        customSpacing: event.customSpacing,
+      ),
+    );
     Map<String, Book>? bookByIndexedFilePath;
 
     // עץ ה-facets נבנה על טווח הסריקה המקורי: כשהחיפוש רץ על אותו טווח, ספירות
@@ -317,6 +331,14 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
 
         final bookCounts = update.bookCounts;
         if (update.totalCount != null) {
+          tracked.onEvent(
+            phase: update is SearchCountProgress
+                ? LexicalSearchPhase.counting
+                : allResults.isEmpty
+                ? LexicalSearchPhase.waitingFirstPage
+                : LexicalSearchPhase.streamingResults,
+            total: update.totalCount,
+          );
           // אירוע הספירות — מגיע עוד לפני ה-chunk הראשון של התוצאות.
           Map<String, int>? aggregated;
           if (scopeEqualsSearch && bookCounts != null) {
@@ -353,9 +375,16 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
           continue;
         }
         allResults.addAll(update.results);
+        tracked.onEvent(
+          phase: tracked.phase == LexicalSearchPhase.waitingFirstPage
+              ? LexicalSearchPhase.streamingResults
+              : null,
+          received: allResults.length,
+        );
         emit(
           state.copyWith(
-            results: List.from(allResults),
+            // אורך התצוגה קבוע, והרשימה שמתחתיה מקבלת רק תוספות בסוף.
+            results: UnmodifiableListView(allResults.take(allResults.length)),
             isLoading: true, // עדיין טוען
           ),
         );
@@ -378,7 +407,8 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
 
       emit(
         state.copyWith(
-          results: allResults,
+          // הרשימה הסופית נפרדת מהרשימה של התצוגות שכבר פורסמו.
+          results: List.of(allResults),
           totalResults: state.totalGroups == null
               ? reconciledTotal
               : state.totalResults,
@@ -387,6 +417,7 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
           isCounting: false,
         ),
       );
+      tracked.finish('completed');
       _announceCompletion(
         requestId,
         query,
@@ -397,6 +428,7 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
       );
     } catch (e, stackTrace) {
       if (requestId != _searchRequestId) return;
+      tracked.finish(isSearchCancelledError(e) ? 'cancelled' : 'failed');
       if (isSearchCancelledError(e)) {
         emit(state.copyWith(isLoading: false, isCounting: false));
         return;
@@ -470,7 +502,27 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
       entry.key: Map<String, bool>.unmodifiable(entry.value),
   });
 
+  Map<String, Object?> _describeQuery(
+    String query,
+    String negativeQuery,
+    int facets, {
+    Map<String, Map<String, bool>>? searchOptions,
+    Map<int, List<String>>? alternativeWords,
+    Map<String, String>? customSpacing,
+  }) => ActiveLexicalSearches.describeQuery(
+    query: query,
+    negativeQuery: negativeQuery,
+    mode: state.configuration.searchMode.name,
+    searchOptions: searchOptions ?? const {},
+    alternativeWords: alternativeWords ?? const {},
+    customSpacing: customSpacing ?? const {},
+    facets: facets,
+    isRegex: UserRegexQuery.isValid(query),
+  );
+
   void _cancelEngineSearch() {
+    _tracked?.finish('cancelled');
+    _tracked = null;
     final id = _engineRequestId;
     if (id == null) return;
     _engineRequestId = null;
@@ -1015,17 +1067,26 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
     // זיהוי לפי `filePath` — המפתח היציב של האינדקס. הסדר הקטלוגי שבמזהה
     // המסמך זז כשספרים נוספו/נמחקו מאז האינדוקס, ומזהה ספר שגוי.
     final booksByIndexedFilePath = _booksByIndexedFilePathFor(library);
+    final matchesFacetByFilePath = <String, bool>{};
     final filtered = <SearchResult>[];
     for (final result in state.results) {
-      final book = booksByIndexedFilePath[result.filePath];
-      if (book == null) {
-        return false;
+      final filePath = result.filePath;
+      var matchesFacet = matchesFacetByFilePath[filePath];
+      if (matchesFacet == null) {
+        final book = booksByIndexedFilePath[filePath];
+        if (book == null) {
+          return false;
+        }
+        final facetPath = FacetHelper.buildBookFacet(
+          FacetHelper.resolveCategoryPath(book),
+          book,
+        );
+        matchesFacet = newFacets.any(
+          (facet) => facetContains(facet, facetPath),
+        );
+        matchesFacetByFilePath[filePath] = matchesFacet;
       }
-      final facetPath = FacetHelper.buildBookFacet(
-        FacetHelper.resolveCategoryPath(book),
-        book,
-      );
-      if (newFacets.any((facet) => facetContains(facet, facetPath))) {
+      if (matchesFacet) {
         filtered.add(result);
       }
     }
@@ -1169,6 +1230,18 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
 
     final requestId = _searchRequestId;
     emit(state.copyWith(isLoading: true));
+    final tracked = _tracked = ActiveLexicalSearches.instance.start(
+      _describeQuery(
+        state.searchQuery,
+        state.negativeQuery,
+        state.currentFacets.length,
+        searchOptions: event.searchOptions,
+        alternativeWords: event.alternativeWords,
+        customSpacing: event.customSpacing,
+      ),
+      phase: LexicalSearchPhase.loadingMore,
+      received: state.results.length,
+    );
 
     try {
       // מבקשים את כל התוצאות עד עכשיו + עוד numResults תוצאות
@@ -1240,6 +1313,8 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
       debugPrint('❌ Load more results failed: $e\n$stackTrace');
       UiSnack.showError(LibraryMessages.loadMoreResultsError);
       emit(state.copyWith(isLoading: false, isCounting: false));
+    } finally {
+      tracked.finish('loadMoreEnded');
     }
   }
 

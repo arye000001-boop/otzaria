@@ -514,7 +514,6 @@ class CalendarWidgetState extends State<CalendarWidget> {
         ContextOverlayPanel(
           isOpen: _isSettingsPanelOpen,
           onClose: _toggleSettingsPanel,
-          width: 400,
           title: 'הגדרות',
           child: const Expanded(
             child: CalendarSettingsPanel(),
@@ -568,7 +567,6 @@ class CalendarWidgetState extends State<CalendarWidget> {
         ContextOverlayPanel(
           isOpen: _isSettingsPanelOpen,
           onClose: _toggleSettingsPanel,
-          width: 400,
           child: Column(
             children: [
               Padding(
@@ -732,6 +730,7 @@ class CalendarWidgetState extends State<CalendarWidget> {
             baseJewishMonth: jd.getJewishMonth(),
             baseJewishDay: jd.getJewishDayOfMonth(),
             recurrenceType: result.recurrenceType,
+            weeklyDays: () => result.weeklyDays,
             recurringYears: () => result.recurringYears,
             eventTime: () => result.eventTime,
             endTime: () => result.endTime,
@@ -752,6 +751,7 @@ class CalendarWidgetState extends State<CalendarWidget> {
           description: result.description,
           baseGregorianDate: result.selectedDate,
           recurrenceType: result.recurrenceType,
+          weeklyDays: result.weeklyDays,
           recurringYears: result.recurringYears,
           eventTime: result.eventTime,
           endTime: result.endTime,
@@ -773,6 +773,7 @@ class CalendarWidgetState extends State<CalendarWidget> {
     showCalendarPrintDialog(
       context: context,
       calendarView: state.calendarView,
+      enabledZmanim: state.enabledZmanim,
       closeShortcut: _shortcutActivator(
         context.read<SettingsBloc>().state.shortcuts,
         'key-shortcut-print',

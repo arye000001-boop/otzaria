@@ -10,6 +10,9 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:otzaria/core/error_log_file.dart';
 import 'package:otzaria/core/ui_snack.dart';
+import 'package:otzaria/core/download_network_policy.dart';
+import 'package:otzaria/core/messages/common_messages.dart';
+import 'package:otzaria/core/messages/library_messages.dart';
 import 'package:otzaria/data/data_providers/file_system_data_provider.dart';
 import 'package:otzaria/data/repository/data_repository.dart';
 import 'package:otzaria/library/bloc/library_bloc.dart';
@@ -150,6 +153,16 @@ Future<String?> _failedDownloadMessage(
   return shown;
 }
 
+Future<void> _pumpUntilFound(WidgetTester tester, Finder finder) async {
+  final deadline = DateTime.now().add(const Duration(seconds: 5));
+  await tester.pump();
+  while (finder.evaluate().isEmpty && DateTime.now().isBefore(deadline)) {
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    await tester.pump();
+  }
+  expect(finder, findsOneWidget);
+}
+
 void main() {
   group('כתובת ההורדה', () {
     test('נבנית מתוך מזהה הספר', () {
@@ -165,6 +178,71 @@ void main() {
   });
 
   group('כפתור ההורדה בדיאלוג הספר', () {
+    testWidgets('המתנת WiFi מוצגת בכפתור ומתנקה עם סיום ההורדה', (
+      tester,
+    ) async {
+      await Settings.init(cacheProvider: MemorySettingsCache());
+      final previous = DownloadNetworkPolicy.instance;
+      final network = StreamController<bool>.broadcast(sync: true);
+      final policy = DownloadNetworkPolicy(
+        isAndroid: true,
+        wifiOnlyReader: () => true,
+        wifiChanges: () => network.stream,
+      );
+      DownloadNetworkPolicy.instance = policy;
+      addTearDown(() async {
+        DownloadNetworkPolicy.instance = previous;
+        await policy.dispose();
+        await network.close();
+      });
+      final ready = policy.refresh();
+      network.add(false);
+      await ready;
+      final folder = Directory.systemTemp.createTempSync('hb_wifi_');
+      addTearDown(() => folder.deleteSync(recursive: true));
+      await Settings.setValue<String>(
+        SettingsRepository.keyHebrewBooksPath,
+        folder.path,
+      );
+      final library = _MockLibraryBloc();
+      whenListen(
+        library,
+        const Stream<LibraryState>.empty(),
+        initialState: LibraryState.initial(),
+      );
+      await tester.pumpWidget(
+        BlocProvider<LibraryBloc>.value(
+          value: library,
+          child: _wrap(
+            OtzarBookDialog(book: _hebrewBook()),
+            navigatorKey: navigatorKey,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      var requests = 0;
+      final client = MockClient((_) async {
+        requests++;
+        return http.Response('', 404);
+      });
+      await tester.runAsync(
+        () => http.runWithClient(() async {
+          await tester.tap(find.text('הורדת הקובץ'));
+          await _pumpUntilFound(
+            tester,
+            find.text(CommonMessages.waitingForWifi),
+          );
+          expect(requests, 0);
+          network.add(true);
+          await _pumpUntilFound(tester, find.text('הורדת הקובץ'));
+          expect(requests, 1);
+          expect(find.text(CommonMessages.waitingForWifi), findsNothing);
+        }, () => client),
+      );
+      UiSnack.hide();
+      await tester.pump(const Duration(seconds: 5));
+    });
+
     testWidgets('מוצג לספר היברובוקס לצד "פתח באתר"', (tester) async {
       await tester.pumpWidget(_wrap(OtzarBookDialog(book: _hebrewBook())));
       await tester.pumpAndSettle();
@@ -321,28 +399,32 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
-        final chunks = StreamController<List<int>>.broadcast();
-        final retryChunks = StreamController<List<int>>.broadcast();
-        addTearDown(chunks.close);
-        addTearDown(retryChunks.close);
-        var requests = 0;
-        final client = MockClient.streaming((_, _) async {
-          requests++;
-          return http.StreamedResponse(
-            requests == 1 ? chunks.stream : retryChunks.stream,
-            200,
-            contentLength: 8,
+        await tester.runAsync(() async {
+          final listening = Completer<void>();
+          final retryListening = Completer<void>();
+          final chunks = StreamController<List<int>>.broadcast(
+            onListen: listening.complete,
           );
-        });
+          final retryChunks = StreamController<List<int>>.broadcast(
+            onListen: retryListening.complete,
+          );
+          addTearDown(chunks.close);
+          addTearDown(retryChunks.close);
+          var requests = 0;
+          final client = MockClient.streaming((_, _) async {
+            requests++;
+            return http.StreamedResponse(
+              requests == 1 ? chunks.stream : retryChunks.stream,
+              200,
+              contentLength: 8,
+            );
+          });
 
-        await tester.runAsync(
-          () => http.runWithClient(() async {
+          await http.runWithClient(() async {
             await tester.tap(find.text('הורדת הקובץ'));
-            await Future<void>.delayed(Duration.zero);
+            await listening.future.timeout(const Duration(seconds: 5));
             chunks.add('%PDF'.codeUnits);
-            await Future<void>.delayed(Duration.zero);
-            await tester.pump();
-            expect(downloadButton('מוריד... 50%'), findsOneWidget);
+            await _pumpUntilFound(tester, downloadButton('מוריד... 50%'));
             expect(requests, 1);
 
             await setOffline(tester, true);
@@ -353,9 +435,8 @@ void main() {
               findsNothing,
             );
             chunks.add('-1'.codeUnits);
-            await Future<void>.delayed(Duration.zero);
             await setOffline(tester, false);
-            expect(downloadButton('מוריד... 75%'), findsOneWidget);
+            await _pumpUntilFound(tester, downloadButton('מוריד... 75%'));
             final button = tester.widget<ActionButton>(
               downloadButton('מוריד... 75%'),
             );
@@ -368,35 +449,33 @@ void main() {
             await setOffline(tester, true);
             chunks.addError(const SocketException('network lost'));
             await chunks.close();
-            await ErrorLogFile.flushPending();
-            await tester.pump();
-            expect(find.text('הורדת הקובץ'), findsNothing);
-            expect(
-              find.text('הורדת הספר נכשלה. פרטי השגיאה נרשמו ביומן השגיאות.'),
-              findsOneWidget,
+            await _pumpUntilFound(
+              tester,
+              find.text(LibraryMessages.hebrewBookDownloadError),
             );
+            await ErrorLogFile.flushPending();
+            expect(find.text('הורדת הקובץ'), findsNothing);
             UiSnack.hide();
             await setOffline(tester, false);
             expect(find.text('הורדת הקובץ'), findsOneWidget);
 
             await tester.tap(find.text('הורדת הקובץ'));
-            await Future<void>.delayed(Duration.zero);
+            await retryListening.future.timeout(const Duration(seconds: 5));
             expect(requests, 2);
             await setOffline(tester, true);
             retryChunks.add('%PDF-1.4'.codeUnits);
             await retryChunks.close();
             final saved = File('${folder.path}/10022.pdf');
-            final deadline = DateTime.now().add(const Duration(seconds: 5));
-            while ((!saved.existsSync() || saved.lengthSync() != 8) &&
-                DateTime.now().isBefore(deadline)) {
-              await Future<void>.delayed(const Duration(milliseconds: 10));
-            }
+            await _pumpUntilFound(
+              tester,
+              find.text('הורדת הקובץ', skipOffstage: false),
+            );
             expect(await saved.readAsString(), '%PDF-1.4');
             await setOffline(tester, false);
             expect(find.text('הורדת הקובץ'), findsOneWidget);
             expect(requests, 2);
-          }, () => client),
-        );
+          }, () => client);
+        });
         UiSnack.hide();
         await tester.pump(const Duration(seconds: 5));
       },

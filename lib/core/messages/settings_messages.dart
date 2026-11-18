@@ -26,6 +26,31 @@ abstract class SettingsMessages {
       'הספרייה הועברה, אך חלק מהקבצים הישנים לא נמחקו. ניתן למחוק אותם '
       'ידנית מהמיקום הישן.';
 
+  // ── תיקיות אישיות (custom_folders_bloc) ─────────────────────────────────
+
+  static String customFolderBooksChanged(int added, int updated) =>
+      '$added ספרים נוספו, $updated עודכנו';
+
+  static String customFolderFailedCount(int failed) => 'כשל: $failed';
+
+  static const String customFolderAddedNoNewBooks =
+      'התיקייה נוספה. לא נמצאו ספרים חדשים.';
+
+  static const String customFolderRemovedWithBooks =
+      'התיקייה והספרים הוסרו מהתוכנה.';
+
+  static const String customFolderRemovedKeptBooks =
+      'התיקייה הוסרה. הספרים נשארו בתוכנה.';
+
+  static const String customFolderContentRescanned =
+      'תוכן הספרים נסרק ועודכן.\nמעתה הספרים ייקראו ישירות מהקבצים.';
+
+  static String customFolderScanDone(int added, int updated) =>
+      'הסריקה הושלמה: $added ספרים נוספו, $updated עודכנו';
+
+  static const String customFolderScanNoNewBooks =
+      'הסריקה הושלמה. לא נמצאו ספרים חדשים.';
+
   // ── סיסמת מצב מוגן (safer_mode_password_dialog) ────────────────────────
 
   static const String passwordRequired = 'נא להזין סיסמה';
@@ -70,6 +95,23 @@ abstract class SettingsMessages {
   // ── תיקיות אישיות (custom_folders_panel) ───────────────────────────────
 
   static const String folderNotFound = 'התיקייה לא נמצאה';
+
+  static String customFolderScanErrors(List<String> errors) =>
+      'שגיאות בסריקת התיקיות האישיות:\n${errorLines(errors)}';
+
+  static String customFolderFileScanFailed(String fileName) =>
+      '$fileName: לא ניתן לסרוק את הקובץ';
+
+  static String customFolderFileImportFailed(String fileName) =>
+      '$fileName: לא ניתן לקלוט את הקובץ';
+
+  static const String customFolderSidecarScanFailed =
+      'לא ניתן לקלוט את קובצי התוכן הנלווים';
+
+  static const String customFolderSyncFailed = 'סנכרון התיקיות האישיות נכשל';
+
+  static String customFolderBookReadFailed(String source, String title) =>
+      '$source: קריאת הספר "$title" נכשלה';
 
   static String folderAdded(String folderName) =>
       'התיקייה "$folderName" נוספה בהצלחה';

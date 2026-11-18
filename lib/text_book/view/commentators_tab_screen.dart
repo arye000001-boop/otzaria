@@ -15,6 +15,7 @@ import 'package:otzaria/book_common/utils/commentator_group_builder.dart';
 import 'package:otzaria/text_book/utils/toc_unit_label.dart';
 import 'package:otzaria_icons/otzaria_icons.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:otzaria/tabs/bloc/tabs_bloc.dart';
 import 'package:otzaria/bookmarks/bloc/bookmark_bloc.dart';
 import 'package:otzaria/bookmarks/models/bookmark.dart';
 import 'package:otzaria/core/focus_repository.dart';
@@ -294,6 +295,10 @@ CommentatorsVerseStep? computeVerseStep(
 /// רוחב חלונית הניווט בכרטיסיית המפרשים.
 const double _kNavPaneWidth = 320;
 
+/// המקום המינימלי לתוכן כדי שחלונית הניווט תידחק ליד התוכן. מתחת לזה היא
+/// נפתחת כ-overlay, ואין טעם בכפתור נעיצה.
+const double _kNavMinMainContentWidth = 400;
+
 class CommentatorsTabScreen extends StatefulWidget {
   final CommentatorsTab tab;
   final Function(OpenedTab) openBookCallback;
@@ -453,9 +458,14 @@ class _CommentatorsTabScreenState extends State<CommentatorsTabScreen>
   void initState() {
     super.initState();
     _focus = FocusRepository.of(context);
-    _navTabController = TabController(length: 3, vsync: this);
+    _navTabController = TabController(
+      length: 3,
+      vsync: this,
+      animationDuration: AppMotion.tabSwitch,
+    );
     _navTabController.addListener(() {
       _searchHost.activeTab = _navTabController.index;
+      if (_navTabController.indexIsChanging) return;
       if (_navTabController.index == _searchTabIndex) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) _searchFocusNode.requestFocus();
@@ -463,6 +473,7 @@ class _CommentatorsTabScreenState extends State<CommentatorsTabScreen>
       } else if (_navTabController.index == 0) {
         // לשונית הניווט: גלילה לפרק הנבחר.
         _scrollNavToSelectedChapter();
+        _focusNavigationSearch();
       }
     });
     // בקשות לפתיחת בחירת מפרשים מ-CommentaryListBase מועברות ישירות אל
@@ -777,7 +788,7 @@ class _CommentatorsTabScreenState extends State<CommentatorsTabScreen>
                               },
                               alignment: AlignmentDirectional.centerEnd,
                               paneWidth: _kNavPaneWidth,
-                              minMainContentWidth: 400,
+                              minMainContentWidth: _kNavMinMainContentWidth,
                               mainContent: _buildCommentaryMainContent(
                                 context,
                                 state,
@@ -951,7 +962,24 @@ class _CommentatorsTabScreenState extends State<CommentatorsTabScreen>
     setState(() => _navPaneOpen = !_navPaneOpen);
     if (_navPaneOpen && _navTabController.index == 0) {
       _scrollNavToSelectedChapter();
+      if (!_pinLeftPane) _focusNavigationSearch();
     }
+  }
+
+  void _focusNavigationSearch() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted ||
+          !(_navPaneOpen || _pinLeftPane) ||
+          _navTabController.index != 0 ||
+          !TickerMode.valuesOf(context).enabled ||
+          ModalRoute.of(context)?.isCurrent == false ||
+          !NavPanelSearch.isWide(context)) {
+        return;
+      }
+      final activePane = context.read<TabsBloc?>()?.state.activePane;
+      if (activePane != null && !identical(activePane, widget.tab)) return;
+      _searchHost.openCollapsibleSearch(0);
+    });
   }
 
   void _openCommentatorsSelectionPane() {
@@ -1019,8 +1047,16 @@ class _CommentatorsTabScreenState extends State<CommentatorsTabScreen>
       nextMajorTooltip: 'הפרק הבא',
       navPaneOpen: _navPaneOpen,
       navPanePinned: _pinLeftPane,
+      canPinNavPane: NavSidePanel.canPin(
+        context,
+        paneWidth: _kNavPaneWidth,
+        minMainContentWidth: _kNavMinMainContentWidth,
+      ),
       onToggleNavPane: _toggleNavPane,
-      onTogglePin: () => setState(() => _pinLeftPane = !_pinLeftPane),
+      onTogglePin: () {
+        setState(() => _pinLeftPane = !_pinLeftPane);
+        if (_pinLeftPane && !_navPaneOpen) _focusNavigationSearch();
+      },
       onPrevMajor: () => _navigateToPrevChapter(chapters),
       onPrevMinor: () => _navigateToPrevVerse(chapters),
       onNextMinor: () => _navigateToNextVerse(chapters),
@@ -1171,6 +1207,7 @@ class _CommentatorsTabScreenState extends State<CommentatorsTabScreen>
     );
 
     return NavPanelCollapsibleSearch(
+      presentation: NavPanelSearchPresentation.persistent,
       delegate: delegate,
       child: ValueListenableBuilder<TextEditingValue>(
         valueListenable: _tocSearchController,

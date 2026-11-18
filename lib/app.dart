@@ -12,6 +12,7 @@ import 'package:otzaria/core/diagnostics/frame_stats_overlay.dart';
 import 'package:otzaria/navigation/bloc/navigation_bloc.dart';
 import 'package:otzaria/plugins/bloc/plugin_system_bloc.dart';
 import 'package:otzaria/tabs/bloc/tabs_bloc.dart';
+import 'package:otzaria/tabs/utils/tab_swipe_log.dart';
 import 'package:otzaria/core/windowing/app_virtual_window_frame.dart';
 import 'package:otzaria/core/windowing/app_window_keys.dart';
 import 'package:otzaria/core/windowing/app_window_scope.dart';
@@ -19,6 +20,7 @@ import 'package:otzaria/core/windowing/mac_menu_bar.dart';
 import 'package:otzaria/core/windowing/window_caption_hit_test.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:otzaria/navigation/view/main_window_screen.dart';
+import 'package:otzaria/search/utils/search_results_report.dart';
 import 'package:otzaria/settings/settings_exports.dart';
 import 'package:otzaria/widgets/feedback/edge_scrollbar_behavior.dart';
 import 'package:otzaria/widgets/misc/middle_click_autoscroll.dart';
@@ -141,6 +143,9 @@ class App extends StatelessWidget {
                   content = MacMenuBar(child: content);
                   content = FrameStatsOverlay(
                     contextProvider: () => _diagnosticsContext(context),
+                    searchResultsProvider: () => describeSearchResults(
+                      context.read<TabsBloc>().state,
+                    ),
                     child: content,
                   );
 
@@ -168,9 +173,12 @@ class App extends StatelessWidget {
   }
 }
 
-Map<String, Object?> _diagnosticsContext(BuildContext context) =>
-    describeAppContext(
-      screen: context.read<NavigationBloc>().state.currentScreen,
-      tabs: context.read<TabsBloc>().state,
-      pluginState: context.read<PluginSystemBloc>().state,
-    );
+Map<String, Object?> _diagnosticsContext(BuildContext context) {
+  final tabs = context.read<TabsBloc>();
+  return describeAppContext(
+    screen: context.read<NavigationBloc>().state.currentScreen,
+    tabs: tabs.state,
+    pluginState: context.read<PluginSystemBloc>().state,
+    tabSwipes: TabSwipeLog.of(tabs),
+  );
+}
