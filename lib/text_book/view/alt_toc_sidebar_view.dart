@@ -25,6 +25,8 @@ import 'package:otzaria/text_book/bloc/text_book_state.dart';
 import 'package:otzaria/text_book/utils/dibburim_structure.dart';
 import 'package:otzaria/text_book/utils/inline_section_markers.dart';
 import 'package:otzaria/text_book/utils/reading_segment_navigation.dart';
+import 'package:otzaria/utils/text/text_manipulation.dart'
+    show HolyNameStyle, replaceHolyNames;
 import 'package:otzaria/text_book/utils/section_search_utils.dart'
     show bracketMarkerFractionInLine;
 import 'package:otzaria/widgets/navigation/nav_panel_search.dart';
@@ -79,6 +81,58 @@ class AltTocSidebarView extends StatefulWidget {
   State<AltTocSidebarView> createState() => _AltTocSidebarViewState();
 }
 
+class _AltTocTree {
+  final roots = <AltTocEntry>[];
+  final _childrenByParent = <int, List<AltTocEntry>>{};
+  final _parentByChild = <int, int>{};
+
+  _AltTocTree(List<AltTocEntry> entries) {
+    for (final entry in entries) {
+      final parentId = entry.parentId;
+      if (parentId == null) {
+        roots.add(entry);
+      } else {
+        _childrenByParent.putIfAbsent(parentId, () => []).add(entry);
+        _parentByChild[entry.id] = parentId;
+      }
+    }
+  }
+
+  List<AltTocEntry> childrenOf(int id) => _childrenByParent[id] ?? const [];
+
+  int? parentOf(int id) => _parentByChild[id];
+
+  late final entriesInOrder = _flatten();
+
+  late final branchIds = [
+    for (final entry in entriesInOrder)
+      if (_childrenByParent.containsKey(entry.id)) entry.id,
+  ];
+
+  late final _entriesById = _indexEntries();
+
+  AltTocEntry? entryById(int id) => _entriesById[id];
+
+  List<AltTocEntry> _flatten() {
+    final entries = <AltTocEntry>[];
+    void visit(AltTocEntry entry) {
+      entries.add(entry);
+      childrenOf(entry.id).forEach(visit);
+    }
+
+    roots.forEach(visit);
+    return entries;
+  }
+
+  Map<int, AltTocEntry> _indexEntries() {
+    final byId = <int, AltTocEntry>{};
+    for (final entry in entriesInOrder) {
+      byId.putIfAbsent(entry.id, () => entry);
+    }
+    return byId;
+  }
+}
+
 class _AltTocSidebarViewState extends State<AltTocSidebarView>
     with AutomaticKeepAliveClientMixin {
   @override
@@ -99,15 +153,7 @@ class _AltTocSidebarViewState extends State<AltTocSidebarView>
   // Available structures (e.g., Parasha, Daf)
   List<AltTocStructure> _structures = [];
 
-  // Structure Data Caches
-  // StructureID -> Root Entries
-  final Map<int, List<AltTocEntry>> _structureRoots = {};
-  // StructureID -> (ParentID -> Children)
-  final Map<int, Map<int, List<AltTocEntry>>> _structureChildren = {};
-  // StructureID -> (ChildID -> ParentID)
-  final Map<int, Map<int, int>> _structureParents = {};
-  // StructureID -> entries in document order, cached for search and active entry.
-  final Map<int, List<AltTocEntry>> _flattenedEntries = {};
+  final Map<int, _AltTocTree> _trees = {};
 
   // Expanded state
   // StructureID -> bool
@@ -124,7 +170,7 @@ class _AltTocSidebarViewState extends State<AltTocSidebarView>
   // Active entry and scroll state are scoped to a structure: a line may belong
   // to several alternative structures at once.
   final Map<int, int> _activeEntryIds = {};
-  final Map<int, int> _selectedEntryLineIndices = {};
+  final Map<int, ({int entryId, int lineIndex})> _selectedEntries = {};
   int _navigationRequest = 0;
   final Map<int, int> _lastScrolledEntryIds = {};
 
@@ -160,9 +206,8 @@ class _AltTocSidebarViewState extends State<AltTocSidebarView>
         identical(oldWidget.tableOfContents, widget.tableOfContents)) {
       return;
     }
-    if (_structureRoots.containsKey(kDibburimStructureId)) {
-      _processEntries(
-        kDibburimStructureId,
+    if (_trees.containsKey(kDibburimStructureId)) {
+      _trees[kDibburimStructureId] = _AltTocTree(
         buildDibburimEntries(widget.tableOfContents, widget.dibburim),
       );
     }
@@ -269,26 +314,7 @@ class _AltTocSidebarViewState extends State<AltTocSidebarView>
     _handleEntryTap(structureId, entry);
   }
 
-  List<AltTocEntry> _flattenEntries(int structureId) {
-    final cached = _flattenedEntries[structureId];
-    if (cached != null) return cached;
-    final result = <AltTocEntry>[];
-    void visit(AltTocEntry entry) {
-      result.add(entry);
-      final children = _structureChildren[structureId]?[entry.id] ?? [];
-      for (final child in children) {
-        visit(child);
-      }
-    }
-
-    for (final root in _structureRoots[structureId] ?? []) {
-      visit(root);
-    }
-    return _flattenedEntries[structureId] = result;
-  }
-
-  /// התוצאות האחרונות, לפי השאילתה וזהות הרשימות של [_flattenEntries] (טעינה
-  /// מחליפה רשימה): כל חץ בונה מחדש, וסריקת אלפי דיבורים עולה אלפיות שנייה.
+  /// התוצאות האחרונות נשמרות עד לשינוי השאילתה או החלפת מבנה טעון.
   ({
     String query,
     List<List<AltTocEntry>> sources,
@@ -299,7 +325,10 @@ class _AltTocSidebarViewState extends State<AltTocSidebarView>
   List<({int structureId, AltTocEntry entry})> _getMatchingEntries(
     String rawQuery,
   ) {
-    final sources = [for (final s in _structures) _flattenEntries(s.id)];
+    final sources = [
+      for (final structure in _structures)
+        _trees[structure.id]?.entriesInOrder ?? const <AltTocEntry>[],
+    ];
     final last = _lastMatches;
     if (last != null &&
         last.query == rawQuery &&
@@ -311,10 +340,10 @@ class _AltTocSidebarViewState extends State<AltTocSidebarView>
     if (normalizedQuery.isEmpty) return [];
 
     final results = <({int structureId, AltTocEntry entry})>[];
-    for (final structure in _structures) {
-      for (final entry in _flattenEntries(structure.id)) {
+    for (var i = 0; i < _structures.length; i++) {
+      for (final entry in sources[i]) {
         if (altTocEntryMatchText(entry).contains(normalizedQuery)) {
-          results.add((structureId: structure.id, entry: entry));
+          results.add((structureId: _structures[i].id, entry: entry));
         }
       }
     }
@@ -348,9 +377,7 @@ class _AltTocSidebarViewState extends State<AltTocSidebarView>
           }
           // השמטת שם הספר יכולה להשאיר דיבורים ישירות בשורש.
           if (structure.id != kDibburimStructureId ||
-              _structureRoots[structure.id]?.every(
-                    (entry) => entry.hasChildren,
-                  ) ==
+              _trees[structure.id]?.roots.every((entry) => entry.hasChildren) ==
                   true) {
             _toggleStructure(structure);
           }
@@ -376,7 +403,7 @@ class _AltTocSidebarViewState extends State<AltTocSidebarView>
 
   Future<void> _loadEntriesForStructure(int structureId) {
     // Already loaded — return immediately
-    if (_structureRoots.containsKey(structureId)) return Future.value();
+    if (_trees.containsKey(structureId)) return Future.value();
 
     // Load in-flight — return the same Future so every awaiter waits for it
     if (_loadingFutures.containsKey(structureId)) {
@@ -399,7 +426,7 @@ class _AltTocSidebarViewState extends State<AltTocSidebarView>
 
       if (mounted) {
         setState(() {
-          _processEntries(structureId, entries);
+          _trees[structureId] = _AltTocTree(entries);
         });
 
         // Check active item for this newly loaded structure
@@ -409,24 +436,6 @@ class _AltTocSidebarViewState extends State<AltTocSidebarView>
       debugPrint('Error loading entries for structure $structureId: $e');
     } finally {
       _loadingFutures.remove(structureId);
-    }
-  }
-
-  void _processEntries(int structureId, List<AltTocEntry> entries) {
-    _structureRoots[structureId] = [];
-    _structureChildren[structureId] = {};
-    _structureParents[structureId] = {};
-    _flattenedEntries.remove(structureId);
-
-    for (var entry in entries) {
-      if (entry.parentId == null) {
-        _structureRoots[structureId]!.add(entry);
-      } else {
-        _structureChildren[structureId]!
-            .putIfAbsent(entry.parentId!, () => [])
-            .add(entry);
-        _structureParents[structureId]![entry.id] = entry.parentId!;
-      }
     }
   }
 
@@ -514,18 +523,23 @@ class _AltTocSidebarViewState extends State<AltTocSidebarView>
     }
     if (_structureExpanded[structureId] != true) return null;
     await _loadEntriesForStructure(structureId);
-    return activeDibburimEntryId(_flattenEntries(structureId), lineIndex);
+    return activeDibburimEntryId(
+      _trees[structureId]?.entriesInOrder ?? const [],
+      lineIndex,
+    );
   }
 
   /// האב הגלוי הגבוה ביותר של [entryId]: הערך עצמו כשכל אבותיו פתוחים.
   int _visibleAncestor(int structureId, int entryId) {
-    final parents = _structureParents[structureId] ?? const {};
+    final tree = _trees[structureId];
+    if (tree == null) return entryId;
     var visible = entryId;
-    var current = entryId;
-    while (parents.containsKey(current)) {
-      final parent = parents[current]!;
+    for (
+      var parent = tree.parentOf(entryId);
+      parent != null;
+      parent = tree.parentOf(parent)
+    ) {
       if (_entryExpanded[parent] != true) visible = parent;
-      current = parent;
     }
     return visible;
   }
@@ -550,7 +564,7 @@ class _AltTocSidebarViewState extends State<AltTocSidebarView>
     final changed = matches
         .where((match) => _activeEntryIds[match.structureId] != match.entryId)
         .where(
-          (match) => !_sharesLineWithActive(
+          (match) => !_keepsClickedEntry(
             match.structureId,
             match.entryId,
             lineIndex,
@@ -600,7 +614,7 @@ class _AltTocSidebarViewState extends State<AltTocSidebarView>
                 structure.id == databaseMatch.structureId;
           }
         }
-        if (!_structureRoots.containsKey(databaseMatch.structureId)) {
+        if (!_trees.containsKey(databaseMatch.structureId)) {
           _structureExpanded[databaseMatch.structureId] = true;
           _loadEntriesForStructure(databaseMatch.structureId).then((_) {
             if (mounted) {
@@ -621,16 +635,21 @@ class _AltTocSidebarViewState extends State<AltTocSidebarView>
     }
   }
 
-  /// אחים שנפתחים באותה שורה (דפים בפסקה אחת) ממופים במסד לאחרון שבהם,
-  /// ולכן האח שנבחר בלחיצה נשאר מסומן כל עוד השורה לא התחלפה.
-  bool _sharesLineWithActive(int structureId, int entryId, int lineIndex) {
-    if (_selectedEntryLineIndices[structureId] != lineIndex) return false;
+  bool _isGemaraDapim(int structureId) =>
+      _structures.any((s) => s.id == structureId && s.key == 'GemaraDapim');
+
+  /// בדפי הגמרא שומרים את העוגן שנלחץ באותה פסקה. במבנים אחרים
+  /// רק כותרות אחיות באותה שורה חולקות עוגן.
+  bool _keepsClickedEntry(int structureId, int entryId, int lineIndex) {
+    final selected = _selectedEntries[structureId];
+    if (selected?.lineIndex != lineIndex) return false;
     final activeId = _activeEntryIds[structureId];
     if (activeId == null || structureId == kDibburimStructureId) return false;
-    AltTocEntry? find(int id) =>
-        _flattenEntries(structureId).where((e) => e.id == id).firstOrNull;
-    final active = find(activeId);
-    final resolved = find(entryId);
+    if (_isGemaraDapim(structureId)) return selected!.entryId == activeId;
+
+    final tree = _trees[structureId];
+    final active = tree?.entryById(activeId);
+    final resolved = tree?.entryById(entryId);
     return active != null &&
         resolved != null &&
         active.lineId != null &&
@@ -639,7 +658,7 @@ class _AltTocSidebarViewState extends State<AltTocSidebarView>
   }
 
   void _selectEntry(int structureId, int entryId, int lineIndex) {
-    _selectedEntryLineIndices[structureId] = lineIndex;
+    _selectedEntries[structureId] = (entryId: entryId, lineIndex: lineIndex);
     final previous = _activeEntryIds[structureId];
     if (previous == entryId) return;
     _selectionTicks[previous]?.value++;
@@ -694,29 +713,21 @@ class _AltTocSidebarViewState extends State<AltTocSidebarView>
 
   /// הערך כבר גלוי בעץ, ולכן ההרחבה שב-[_findAndHighlightEntry] לא תשנה דבר.
   bool _isRevealed(int structureId, int entryId) {
-    if (_structureExpanded[structureId] != true ||
-        !_structureRoots.containsKey(structureId)) {
+    final tree = _trees[structureId];
+    if (_structureExpanded[structureId] != true || tree == null) {
       return false;
     }
-    final parents = _structureParents[structureId] ?? const {};
-    for (var id = parents[entryId]; id != null; id = parents[id]) {
+    for (var id = tree.parentOf(entryId); id != null; id = tree.parentOf(id)) {
       if (_entryExpanded[id] != true) return false;
     }
     return true;
   }
 
   void _expandParents(int structureId, int entryId) {
-    if (!_structureParents.containsKey(structureId)) return;
-
-    var currentId = entryId;
-    final parents = _structureParents[structureId]!;
-
-    while (parents.containsKey(currentId)) {
-      final parentId = parents[currentId]!;
-      if (_entryExpanded[parentId] != true) {
-        _entryExpanded[parentId] = true;
-      }
-      currentId = parentId;
+    final tree = _trees[structureId];
+    if (tree == null) return;
+    for (var id = tree.parentOf(entryId); id != null; id = tree.parentOf(id)) {
+      _entryExpanded[id] = true;
     }
   }
 
@@ -729,7 +740,11 @@ class _AltTocSidebarViewState extends State<AltTocSidebarView>
   }
 
   /// גלילת הספר הפתוח לשורה [lineIndex], ולסמן `[markerTitle…]` כשהוא בתוכה.
-  Future<void> _scrollToLine(int lineIndex, {String? markerTitle}) async {
+  Future<void> _scrollToLine(
+    int lineIndex, {
+    String? markerTitle,
+    bool gemaraDapim = false,
+  }) async {
     final request = ++_navigationRequest;
     final bloc = context.read<TextBookBloc>();
     final state = bloc.state;
@@ -757,7 +772,11 @@ class _AltTocSidebarViewState extends State<AltTocSidebarView>
       lineIndex,
       intraLineFraction: line == null || markerTitle == null
           ? 0
-          : bracketMarkerFractionInLine(line, markerTitle),
+          : bracketMarkerFractionInLine(
+              line,
+              markerTitle,
+              gemaraDapim: gemaraDapim,
+            ),
       duration: const Duration(milliseconds: 300),
       curve: Curves.easeInOut,
     );
@@ -772,12 +791,17 @@ class _AltTocSidebarViewState extends State<AltTocSidebarView>
     );
   }
 
-  Future<void> _openLink(Link link, {String? markerTitle}) async {
+  Future<void> _openLink(
+    Link link, {
+    String? markerTitle,
+    bool gemaraDapim = false,
+  }) async {
     if (link.path2 == widget.book.title) {
       // Ensure index is at least 0 to prevent RangeError
       await _scrollToLine(
         (link.index2 - 1).clamp(0, double.maxFinite).toInt(),
         markerTitle: markerTitle,
+        gemaraDapim: gemaraDapim,
       );
     } else {
       context.read<TabsBloc>().add(
@@ -830,7 +854,7 @@ class _AltTocSidebarViewState extends State<AltTocSidebarView>
       // צומת בלי קישור משלו: הלחיצה פותחת/סוגרת, ורק בפתיחה מנווטת לבן הראשון.
       if (links.isEmpty &&
           toggleIfLinkless &&
-          (_structureChildren[structureId]?[entry.id]?.isNotEmpty ?? false)) {
+          (_trees[structureId]?.childrenOf(entry.id).isNotEmpty ?? false)) {
         if (!mounted) return;
         final wasExpanded = _entryExpanded[entry.id] ?? false;
         _toggleEntryExpanded(entry.id);
@@ -842,9 +866,11 @@ class _AltTocSidebarViewState extends State<AltTocSidebarView>
       if (links.isEmpty) {
         AltTocEntry? current = entry;
         while (current != null && links.isEmpty) {
-          final children = _structureChildren[structureId]?[current.id];
-          if (children != null && children.isNotEmpty) {
-            current = children.first;
+          final firstChild = _trees[structureId]
+              ?.childrenOf(current.id)
+              .firstOrNull;
+          if (firstChild != null) {
+            current = firstChild;
             linkEntry = current;
             links = await DatabaseLibraryProvider.instance
                 .getLinksForAltTocEntry(
@@ -877,7 +903,11 @@ class _AltTocSidebarViewState extends State<AltTocSidebarView>
           if (link.path2 == widget.book.title) {
             _selectEntry(structureId, linkEntry.id, link.index2 - 1);
           }
-          await _openLink(link, markerTitle: linkEntry.text);
+          await _openLink(
+            link,
+            markerTitle: linkEntry.text,
+            gemaraDapim: _isGemaraDapim(structureId),
+          );
         }
       } else {
         UiSnack.show(TextBookMessages.headingLinkNotFound);
@@ -894,12 +924,12 @@ class _AltTocSidebarViewState extends State<AltTocSidebarView>
     if (wasExpanded) return;
 
     // Ensure entries are loaded
-    if (!_structureRoots.containsKey(structure.id)) {
+    if (!_trees.containsKey(structure.id)) {
       await _loadEntriesForStructure(structure.id);
       if (!mounted) return;
     }
 
-    final roots = _structureRoots[structure.id];
+    final roots = _trees[structure.id]?.roots;
     if (roots != null && roots.isNotEmpty) {
       // Navigate to the first root entry
       _handleLeafClick(structure.id, roots.first);
@@ -908,9 +938,22 @@ class _AltTocSidebarViewState extends State<AltTocSidebarView>
     }
   }
 
+  HolyNameStyle? _holyNameStyle;
+
+  String _displayTitle(String text) {
+    final style = _holyNameStyle;
+    return style == null ? text : replaceHolyNames(text, style: style);
+  }
+
   @override
   Widget build(BuildContext context) {
     super.build(context);
+    _holyNameStyle = context.select((TextBookBloc bloc) {
+      final state = bloc.state;
+      return state is TextBookLoaded
+          ? state.bodyDisplayProfile.holyName.style
+          : null;
+    });
 
     if (_isLoading) {
       return const Center(child: CircularProgressIndicator());
@@ -1021,7 +1064,7 @@ class _AltTocSidebarViewState extends State<AltTocSidebarView>
                           crossAxisAlignment: CrossAxisAlignment.stretch,
                           children: [
                             NavTreeHeader(
-                              title: widget.book.title,
+                              title: _displayTitle(widget.book.title),
                               trailing: Row(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
@@ -1067,7 +1110,7 @@ class _AltTocSidebarViewState extends State<AltTocSidebarView>
         itemBuilder: (context, index) {
           if (index == 0) {
             return NavTreeHeader(
-              title: widget.book.title,
+              title: _displayTitle(widget.book.title),
               trailing: const NavPanelSearchToggle(),
             );
           }
@@ -1080,7 +1123,7 @@ class _AltTocSidebarViewState extends State<AltTocSidebarView>
             isGroupStart: index == 1,
             isGroupEnd: index == matches.length,
             child: NavTreeTile.heading(
-              title: entry.text ?? '',
+              title: _displayTitle(entry.text ?? ''),
               level: 0,
               isSelected: isSelected,
               onTap: () {
@@ -1095,7 +1138,7 @@ class _AltTocSidebarViewState extends State<AltTocSidebarView>
   }
 
   String _structureTitle(AltTocStructure structure) =>
-      structure.heTitle ?? structure.title ?? structure.key;
+      _displayTitle(structure.heTitle ?? structure.title ?? structure.key);
 
   Widget _buildStructureChips() {
     return Padding(
@@ -1122,10 +1165,8 @@ class _AltTocSidebarViewState extends State<AltTocSidebarView>
 
   Widget _buildSelectedStructureEntries() {
     final structureId = _selectedStructureId;
-    final roots = structureId == null
-        ? const <AltTocEntry>[]
-        : _structureRoots[structureId] ?? const <AltTocEntry>[];
-    if (roots.isEmpty && _structureRoots.containsKey(structureId)) {
+    final roots = _trees[structureId]?.roots ?? const <AltTocEntry>[];
+    if (roots.isEmpty && _trees.containsKey(structureId)) {
       return const OtzariaEmptyState(
         isCompact: true,
         scrollable: false,
@@ -1152,11 +1193,7 @@ class _AltTocSidebarViewState extends State<AltTocSidebarView>
         _structureExpanded[structureId] != true) {
       return null;
     }
-    final children = _structureChildren[structureId] ?? const {};
-    final branches = [
-      for (final entry in _flattenEntries(structureId))
-        if (children[entry.id]?.isNotEmpty ?? false) entry.id,
-    ];
+    final branches = _trees[structureId]?.branchIds ?? const <int>[];
     if (branches.isEmpty) return null;
     void setAll(bool expanded) {
       setState(() {
@@ -1178,10 +1215,10 @@ class _AltTocSidebarViewState extends State<AltTocSidebarView>
 
   Widget _buildStructureItem(AltTocStructure structure) {
     final isExpanded = _structureExpanded[structure.id] ?? false;
-    final roots = _structureRoots[structure.id] ?? [];
+    final roots = _trees[structure.id]?.roots ?? const <AltTocEntry>[];
     // הכותרות נטענות רק בפתיחה, ולכן מבנה שעוד לא נטען מציג חץ.
     final hasChildren =
-        !_structureRoots.containsKey(structure.id) ||
+        !_trees.containsKey(structure.id) ||
         roots.isNotEmpty ||
         (structure.id == kDibburimStructureId && _hasDibburimEntries);
 
@@ -1217,8 +1254,9 @@ class _AltTocSidebarViewState extends State<AltTocSidebarView>
   }) {
     final itemKey = _itemKeys.putIfAbsent(entry.id, () => GlobalKey());
 
-    final children = _structureChildren[structureId]?[entry.id];
-    final hasChildren = children != null && children.isNotEmpty;
+    final children =
+        _trees[structureId]?.childrenOf(entry.id) ?? const <AltTocEntry>[];
+    final hasChildren = children.isNotEmpty;
     final isExpanded = _entryExpanded[entry.id] ?? false;
     // רמת המבנה היא 0, ולכן ערכי ה-TOC מוזחים רמה אחת פנימה.
     final level = entry.level + 1;
@@ -1229,7 +1267,7 @@ class _AltTocSidebarViewState extends State<AltTocSidebarView>
         () => ValueNotifier(0),
       ),
       builder: (context, _, _) => NavTreeTile.heading(
-        title: entry.text ?? '',
+        title: _displayTitle(entry.text ?? ''),
         level: level,
         isSelected: entry.id == _activeEntryIds[structureId],
         isExpanded: isExpanded,

@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:collection/collection.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:otzaria/data/data_providers/book_database_resolver.dart';
@@ -411,9 +412,17 @@ typedef AramaicMatchGroups = ({
   int hiddenContainingKeys,
 });
 
+/// נתוני מילון ראשי התיבות שנבנים יחד בזמן הטעינה.
+typedef AcronymIndex = ({
+  Map<String, List<String>> byKey,
+  Map<String, String> originalByKey,
+  List<String> sortedKeys,
+});
+
 typedef AramaicIndex = ({
   List<AramaicDictionaryEntry> entries,
   Set<String> terms,
+  Map<String, List<int>> positionsByTerm,
   List<({String normalized, List<String> words})> index,
 });
 
@@ -455,10 +464,12 @@ class DictionaryLookupRepository {
     _resetLaazLinksCache,
   );
 
+  List<AcronymCatalogEntry>? _acronymCatalog;
+  List<String> _sortedAcronymKeys = const [];
   Map<String, List<String>> _acronymsByKey = <String, List<String>>{};
   Map<String, String> _originalAcronymByKey = <String, String>{};
   List<AramaicDictionaryEntry> _aramaicEntries = <AramaicDictionaryEntry>[];
-  Set<String> _aramaicTerms = <String>{};
+  Map<String, List<int>> _aramaicPositionsByTerm = const {};
   List<String> _aramaicDictionaryNames = const <String>[];
   // מקביל ל-_aramaicEntries: הנרמול נעשה פעם אחת בטעינה ולא בכל תפריט הקשר.
   List<({String normalized, List<String> words})> _aramaicIndex = const [];
@@ -517,6 +528,10 @@ class DictionaryLookupRepository {
   /// קטלוג לחיפוש עם תווית מקורית ומפתח מנורמל, ממוין לפי אורך התווית ואז
   /// לפי א"ב — שוברי השוויון של דירוג החיפוש במסך ראשי התיבות.
   List<AcronymCatalogEntry> getAcronymSearchCatalog() {
+    return _acronymCatalog ??= _buildAcronymSearchCatalog();
+  }
+
+  List<AcronymCatalogEntry> _buildAcronymSearchCatalog() {
     final catalog = [
       for (final entry in _acronymsByKey.entries)
         AcronymCatalogEntry(
@@ -593,19 +608,22 @@ class DictionaryLookupRepository {
       return const <AcronymDictionaryEntry>[];
     }
 
-    return _acronymsByKey.keys
-        .where((key) => key.startsWith(normalized))
-        .map(_buildAcronymEntry)
-        .whereType<AcronymDictionaryEntry>()
-        .toList()
-      ..sort((a, b) {
-        final lengthCompare = a.acronym.length.compareTo(b.acronym.length);
-        if (lengthCompare != 0) {
-          return lengthCompare;
-        }
+    final keys = _sortedAcronymKeys;
+    final matches = <AcronymDictionaryEntry>[];
+    for (
+      var i = lowerBound(keys, normalized);
+      i < keys.length && keys[i].startsWith(normalized);
+      i++
+    ) {
+      final entry = _buildAcronymEntry(keys[i]);
+      if (entry != null) matches.add(entry);
+    }
 
-        return a.acronym.compareTo(b.acronym);
-      });
+    return matches..sort((a, b) {
+      final lengthCompare = a.acronym.length.compareTo(b.acronym.length);
+      if (lengthCompare != 0) return lengthCompare;
+      return a.acronym.compareTo(b.acronym);
+    });
   }
 
   /// בודק אם מפתח ראשי תיבות תואם לשאילתת חיפוש לאחר נרמול גרשיים.
@@ -690,20 +708,18 @@ class DictionaryLookupRepository {
     );
     final normalizedWord = _normalizeAramaic(raw);
     if (normalizedWord.isEmpty) return none;
-    if (!_aramaicTerms.contains(normalizedWord)) return none;
+    final positions = _aramaicPositionsByTerm[normalizedWord];
+    if (positions == null) return none;
 
     final exact = <AramaicDictionaryEntry>[];
     var containing = <int>[];
 
-    for (var i = 0; i < _aramaicEntries.length; i++) {
-      if (!dictionaries.contains(_aramaicEntries[i].dictionary)) continue;
-      final indexed = _aramaicIndex[i];
-      if (indexed.normalized == normalizedWord) {
-        exact.add(_aramaicEntries[i]);
-        continue;
-      }
-
-      if (indexed.words.contains(normalizedWord)) {
+    for (final i in positions) {
+      final entry = _aramaicEntries[i];
+      if (!dictionaries.contains(entry.dictionary)) continue;
+      if (_aramaicIndex[i].normalized == normalizedWord) {
+        exact.add(entry);
+      } else {
         containing.add(i);
       }
     }
@@ -810,7 +826,9 @@ class DictionaryLookupRepository {
     int minWordLength = 2,
   }) {
     final word = _normalizeAramaic(raw);
-    if (word.isEmpty || word.contains(' ') || _aramaicTerms.contains(word)) {
+    if (word.isEmpty ||
+        word.contains(' ') ||
+        _aramaicPositionsByTerm.containsKey(word)) {
       return null;
     }
 
@@ -833,10 +851,11 @@ class DictionaryLookupRepository {
         : _buildAcronymIndex(await loadAcronyms());
     _acronymsByKey = index.byKey;
     _originalAcronymByKey = index.originalByKey;
+    _acronymCatalog = null;
+    _sortedAcronymKeys = index.sortedKeys;
   }
 
-  static ({Map<String, List<String>> byKey, Map<String, String> originalByKey})
-  _buildAcronymIndex(Map<String, List<String>> acronyms) {
+  static AcronymIndex _buildAcronymIndex(Map<String, List<String>> acronyms) {
     final normalizedAcronyms = <String, List<String>>{};
     final originalAcronyms = <String, String>{};
 
@@ -863,13 +882,14 @@ class DictionaryLookupRepository {
         ),
       ),
       originalByKey: originalAcronyms,
+      sortedKeys: normalizedAcronyms.keys.toList()..sort(),
     );
   }
 
   Future<void> _loadAramaicInternal() async {
     final loaded = await _loadAramaic();
     _aramaicEntries = loaded.entries;
-    _aramaicTerms = loaded.terms;
+    _aramaicPositionsByTerm = loaded.positionsByTerm;
     _aramaicDictionaryNames = List<String>.unmodifiable(
       loaded.entries.map((entry) => entry.dictionary).toSet(),
     );
@@ -881,10 +901,10 @@ class DictionaryLookupRepository {
   static AramaicIndex _buildAramaicIndex(
     List<AramaicDictionaryEntry> aramaicEntries,
   ) {
-    final aramaicTerms = <String>{};
+    final positionsByTerm = <String, List<int>>{};
     final aramaicIndex = <({String normalized, List<String> words})>[];
 
-    for (final entry in aramaicEntries) {
+    for (final (i, entry) in aramaicEntries.indexed) {
       final normalizedEntry = _normalizeAramaic(entry.aramaic);
       final words = _splitAramaicWords(normalizedEntry);
       aramaicIndex.add((
@@ -895,13 +915,22 @@ class DictionaryLookupRepository {
         continue;
       }
 
-      aramaicTerms.add(normalizedEntry);
-      aramaicTerms.addAll(words);
+      (positionsByTerm[normalizedEntry] ??= <int>[]).add(i);
+      for (final word in words) {
+        if (word == normalizedEntry) continue;
+        (positionsByTerm[word] ??= <int>[]).add(i);
+      }
     }
 
     return (
       entries: List<AramaicDictionaryEntry>.unmodifiable(aramaicEntries),
-      terms: Set<String>.unmodifiable(aramaicTerms),
+      terms: Set<String>.unmodifiable(positionsByTerm.keys),
+      positionsByTerm: Map<String, List<int>>.unmodifiable(
+        positionsByTerm.map(
+          (term, positions) =>
+              MapEntry(term, List<int>.unmodifiable(positions)),
+        ),
+      ),
       index: List.unmodifiable(aramaicIndex),
     );
   }
@@ -938,20 +967,16 @@ class DictionaryLookupRepository {
     _laazByRashiLine = byRashiLine;
   }
 
-  static Future<
-    ({Map<String, List<String>> byKey, Map<String, String> originalByKey})
-  >
-  _defaultLoadAcronymIndex() async {
+  static Future<AcronymIndex> _defaultLoadAcronymIndex() async {
     final String jsonString = await rootBundle.loadString(
       'assets/Acronyms.json',
     );
-    // נרמול 13 אלף המפתחות תוקע פריימים על ה-UI isolate, ולכן רץ יחד עם הפענוח.
+    // נרמול ומיון המפתחות רצים עם הפענוח כדי למנוע חסימה של הממשק.
     return compute(decodeAcronymIndex, jsonString);
   }
 
   @visibleForTesting
-  static ({Map<String, List<String>> byKey, Map<String, String> originalByKey})
-  decodeAcronymIndex(String jsonString) {
+  static AcronymIndex decodeAcronymIndex(String jsonString) {
     final jsonData = _decodeJsonObject(jsonString);
 
     return _buildAcronymIndex(
@@ -1107,13 +1132,15 @@ class DictionaryLookupRepository {
   }
 
   void _resetAcronymsCache() {
+    _acronymCatalog = null;
+    _sortedAcronymKeys = const [];
     _acronymsByKey = <String, List<String>>{};
     _originalAcronymByKey = <String, String>{};
   }
 
   void _resetAramaicCache() {
     _aramaicEntries = <AramaicDictionaryEntry>[];
-    _aramaicTerms = <String>{};
+    _aramaicPositionsByTerm = const {};
     _aramaicDictionaryNames = const <String>[];
     _aramaicIndex = const [];
     _aramaicPositionsByKey = null;

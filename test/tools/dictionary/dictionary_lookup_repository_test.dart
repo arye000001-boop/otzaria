@@ -80,6 +80,32 @@ void main() {
       expect(matches, isTrue);
     });
 
+    test('חיפוש תחילית שומר על סדר התצוגה ועל עדיפות התאמה מדויקת', () async {
+      repository = DictionaryLookupRepository(
+        loadAcronyms: () async => const {
+          'ועי״ש': ['ועיין שם'],
+          'בתי״ב': ['בתרי טעמי בכתוב'],
+          'ועיינ״א': ['ועיין נא'],
+          'ועיל״ב': ['ועיין לעיל בספר'],
+          'ועי״ל': ['ועיין לעיל'],
+          'ועוד': ['וכן עוד'],
+        },
+      );
+
+      expect(repository.findAcronymMatches('ועי׳'), isEmpty);
+      await repository.ensureAcronymsLoaded();
+
+      expect(
+        repository.findAcronymMatches('ועי׳').map((entry) => entry.acronym),
+        ['ועי״ל', 'ועי״ש', 'ועיל״ב', 'ועיינ״א'],
+      );
+      expect(repository.findAcronymMatches('ועי"ל').single.meanings, [
+        'ועיין לעיל',
+      ]);
+      expect(repository.findAcronymMatches('ו׳'), isEmpty);
+      expect(repository.findAcronymMatches('תת׳'), isEmpty);
+    });
+
     test('מחזיר צירופים ארמיים רק אם המילה קיימת כמונח במילון', () async {
       await repository.ensureLoaded();
 
@@ -101,6 +127,23 @@ void main() {
   });
 
   group('getAcronymSearchCatalog (issue: חיפוש ראשי תיבות איטי)', () {
+    test('קטלוג קבוע שאינו ניתן לשינוי משותף לאחר הטעינה', () async {
+      final repo = DictionaryLookupRepository(
+        loadAcronyms: () async => const {
+          'ועי״ל': ['ועיין לעיל'],
+          'רש״י': ['רבי שלמה יצחקי'],
+        },
+      );
+
+      expect(repo.getAcronymSearchCatalog(), isEmpty);
+      await repo.ensureAcronymsLoaded();
+
+      final catalog = repo.getAcronymSearchCatalog();
+      expect(catalog.map((entry) => entry.displayAcronym), ['רש״י', 'ועי״ל']);
+      expect(repo.getAcronymSearchCatalog(), same(catalog));
+      expect(catalog.clear, throwsUnsupportedError);
+    });
+
     // מילון סינתטי בסדר גודל של המילון האמיתי (כ-13,000 ערכים), כדי שהבדל
     // הביצועים בין נירמול-פעם-אחת לנירמול-לכל-רשומה יהיה מדיד ולא רועש.
     // אותיות עבריות בלבד, בלי ספרות: _trimDecorations גוזם ספרות וסימנים
@@ -747,6 +790,57 @@ void main() {
       expect(groups.exact, isEmpty);
       expect(groups.containing, isEmpty);
       expect(groups.hiddenContainingKeys, 0);
+    });
+
+    test('שומר סדר מקור ומחזיר כל צירוף פעם אחת גם אם המילה חוזרת', () async {
+      const other = 'מילון נוסף';
+      final repository = DictionaryLookupRepository(
+        loadAramaicEntries: () async => const [
+          AramaicDictionaryEntry(aramaic: 'א ב ליה', hebrew: 'ארוך'),
+          AramaicDictionaryEntry(aramaic: 'ליה ליה', hebrew: 'חוזר'),
+          AramaicDictionaryEntry(aramaic: 'ליה', hebrew: 'מדויק'),
+          AramaicDictionaryEntry(
+            aramaic: 'לֵיהּ לֵיהּ',
+            hebrew: 'חוזר במילון נוסף',
+            dictionary: other,
+          ),
+          AramaicDictionaryEntry(aramaic: 'בעי ליה', hebrew: 'קצר'),
+          AramaicDictionaryEntry(
+            aramaic: 'לֵיהּ',
+            hebrew: 'מדויק במילון נוסף',
+            dictionary: other,
+          ),
+        ],
+      );
+      await repository.ensureAramaicLoaded();
+      final dictionaries = {...repository.aramaicDictionaryNames};
+
+      final all = repository.findAramaicMatchGroups(
+        'ליה',
+        dictionaries: dictionaries,
+      );
+      expect(all.exact.map((entry) => entry.hebrew), [
+        'מדויק',
+        'מדויק במילון נוסף',
+      ]);
+      expect(all.containing.map((entry) => entry.hebrew), [
+        'ארוך',
+        'חוזר',
+        'חוזר במילון נוסף',
+        'קצר',
+      ]);
+
+      final limited = repository.findAramaicMatchGroups(
+        'ליה',
+        maxContainingMatches: 1,
+        dictionaries: dictionaries,
+      );
+      expect(limited.containing.map((entry) => entry.hebrew), [
+        'חוזר',
+        'חוזר במילון נוסף',
+      ]);
+      expect(limited.hiddenContainingKeys, 2);
+      expect(repository.findAramaicMatches('א ב ליה').single.hebrew, 'ארוך');
     });
 
     test('findAramaicMatches הוא החיבור של הקבוצות', () {
