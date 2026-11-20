@@ -1,0 +1,33 @@
+name: "Publish Linux raw bundle (from an earlier run)"
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Run id that holds the otzaria-linux-raw artifact"
+        type: string
+        required: true
+permissions:
+  contents: write
+  actions: read
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: otzaria-linux-raw
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+          path: raw
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          find raw -maxdepth 2 | head -20
+          tar -C raw -czf otzaria-linux-x64-raw.tar.gz .
+          ls -la otzaria-linux-x64-raw.tar.gz
+          gh release create "linux-raw-${{ inputs.run_id }}" otzaria-linux-x64-raw.tar.gz \
+            --repo "$GITHUB_REPOSITORY" --title "Linux x64 raw bundle (run ${{ inputs.run_id }})" \
+            --notes "Raw Linux x86_64 bundle copied from run ${{ inputs.run_id }}. Not an official release." \
+            --target "$GITHUB_SHA"
