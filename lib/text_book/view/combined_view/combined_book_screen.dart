@@ -105,6 +105,7 @@ import 'package:otzaria/text_book/view/reader_line/reader_line_render.dart';
 import 'package:otzaria/text_book/view/reader_line/reader_line_spec.dart';
 import 'package:otzaria/text_book/view/widgets/unloaded_paragraph_placeholder.dart';
 import 'package:otzaria/text_book/view/widgets/reading_extent_estimation.dart';
+import 'package:otzaria/text_book/utils/per_book_display_settings.dart';
 import 'package:otzaria/theme/theme_exports.dart';
 
 class CombinedView extends StatefulWidget {
@@ -323,10 +324,10 @@ typedef _CommentaryScrollTarget = ({
 
 final _detailsTag = RegExp(r'<details\b', caseSensitive: false);
 
-/// שוליים משני צדי הפריטים: בימניים מצויר סמן הבחירה, והשמאליים שומרים על
-/// מרכוז עמודת הטקסט.
+/// שוליים משני צדי הפריטים: בימניים מצויר סמן הבחירה והם מרחיקים את הטקסט
+/// מאזור הלחיצה של המסילה; השמאליים שומרים על מרכוז עמודת הטקסט.
 const _selectionGutter = EdgeInsets.symmetric(
-  horizontal: kSelectionGutterWidth,
+  horizontal: kTextColumnMinMargin,
 );
 
 class _ChildBuilder extends StatelessWidget {
@@ -469,6 +470,7 @@ class _CombinedViewState extends State<CombinedView> {
     if (anchorLinks.isEmpty) return rawLine;
     return injectLinkAnchorMarkers(
       rawLine: rawLine,
+      sourceRawLine: note == null ? widget.data[lineIndex0] : null,
       anchorLinks: anchorLinks,
       styleIndexByCommentator: _anchorStyles(state),
       lineIndex: lineIndex0,
@@ -1787,10 +1789,13 @@ class _CombinedViewState extends State<CombinedView> {
         final guard = await commentarySelection.copyGuard?.call();
         if (!mounted) return;
         final settingsState = context.read<SettingsBloc>().state;
+        final book = _textBookBloc.state;
         await ContextMenuUtils.copyFormattedText(
           context: context,
           savedSelectedText: commentarySelection.text,
-          fontSize: settingsState.commentatorsFontSize,
+          fontSize: settingsState.commentatorsFontSizeForBook(
+            book is TextBookLoaded ? book.commentatorsFontSize : null,
+          ),
           link: commentarySelection.link,
           removeNikud: removeNikud,
           copyProfile: profile,
@@ -1972,7 +1977,7 @@ class _CombinedViewState extends State<CombinedView> {
       fontSize: widget.textSize,
       fontFamily: settingsState.fontFamily,
       fontWeight: settingsState.fontBold ? FontWeight.bold : null,
-      lineHeight: settingsState.lineHeight,
+      lineHeight: settingsState.lineHeightForBook(state.lineHeight),
     );
   }
 
@@ -2341,9 +2346,6 @@ class _CombinedViewState extends State<CombinedView> {
                                     onKeyEvent: widget.isPreviewMode
                                         ? null
                                         : _handleSideArrowNavigation,
-                                    maxSpeed: 10000.0,
-                                    curve: 10.0,
-                                    accelerationFactor: 312.5,
                                     scrollController:
                                         widget.tab.lines.itemController,
                                     onNavigationStart:
@@ -2374,8 +2376,11 @@ class _CombinedViewState extends State<CombinedView> {
                                             return SmoothWheelScroll(
                                               child: ScrollPositionReanchor(
                                                 layoutKey: context.select(
-                                                  (SettingsBloc bloc) =>
-                                                      bloc.state.lineHeight,
+                                                  (SettingsBloc bloc) => bloc
+                                                      .state
+                                                      .lineHeightForBook(
+                                                        state.lineHeight,
+                                                      ),
                                                 ),
                                                 preferredIndex:
                                                     _selectedItemIndex(state),
@@ -2424,7 +2429,7 @@ class _CombinedViewState extends State<CombinedView> {
     final itemCount = layout.itemCount;
     // כמו ב-buildOuterList: פתיחה במיקום הטאב (תצוגה מקדימה של תוצאת
     // חיפוש נפתחת בקטע שנמצא, לא בראש הספר).
-    final anchor = widget.tab.readingAnchor;
+    final anchor = widget.tab.openingReadingAnchor(state);
     final initialIndex = layout.itemForLine(anchor.line);
     final clampedInitial = itemCount == 0
         ? 0
@@ -2436,9 +2441,6 @@ class _CombinedViewState extends State<CombinedView> {
       onNavigationStart: widget.tab.lines.beginUserNavigation,
       child: ProgressiveScroll(
         focusNode: _focusNode,
-        maxSpeed: 10000.0,
-        curve: 10.0,
-        accelerationFactor: 312.5,
         scrollController: widget.tab.lines.itemController,
         onNavigationStart: widget.tab.lines.beginUserNavigation,
         child: SmoothWheelScroll(
@@ -2522,7 +2524,7 @@ class _CombinedViewState extends State<CombinedView> {
         (SettingsBloc bloc) => (
           fontFamily: bloc.state.fontFamily,
           fontBold: bloc.state.fontBold,
-          lineHeight: bloc.state.lineHeight,
+          lineHeight: bloc.state.lineHeightForBook(state.lineHeight),
           textMaxWidth: bloc.state.textMaxWidth,
         ),
       );
@@ -2573,7 +2575,7 @@ class _CombinedViewState extends State<CombinedView> {
     _commentaryCardKeys.removeWhere(
       (line, _) => !state.selectedIndices.contains(line),
     );
-    final anchor = widget.tab.readingAnchor;
+    final anchor = widget.tab.openingReadingAnchor(state);
     final initialIndex = layout.itemForLine(anchor.line);
     final itemCount = layout.itemCount;
     final clampedInitial = itemCount == 0
@@ -2692,6 +2694,7 @@ class _CombinedViewState extends State<CombinedView> {
       return UnloadedParagraphPlaceholder(
         lineCount: segment.sourceLineIndices.length,
         fontSize: widget.textSize,
+        lineHeight: state.lineHeight,
       );
     }
     final itemLines = segment?.sourceLineIndices ?? [primaryLineIndex];
@@ -3067,13 +3070,13 @@ class _CombinedViewState extends State<CombinedView> {
       return ReaderLineGutter(
         color: color,
         selectedLines: selectedLines,
-        gutter: _selectionGutter.right,
+        gutter: kSelectionGutterWidth,
         child: child,
       );
     }
     return CustomPaint(
       painter: isSelected
-          ? SelectionGutterPainter(color, gutter: _selectionGutter.right)
+          ? SelectionGutterPainter(color, gutter: kSelectionGutterWidth)
           : null,
       child: child,
     );
@@ -3238,7 +3241,7 @@ class _CombinedViewState extends State<CombinedView> {
       fontSize: widget.textSize,
       fontFamily: settingsState.fontFamily,
       fontWeight: settingsState.fontBold ? FontWeight.bold : null,
-      lineHeight: settingsState.lineHeight,
+      lineHeight: settingsState.lineHeightForBook(state.lineHeight),
     ),
   );
 
@@ -3292,7 +3295,7 @@ class _CombinedViewState extends State<CombinedView> {
     fontSize: widget.textSize,
     fontFamily: settingsState.fontFamily,
     fontWeight: settingsState.fontBold ? FontWeight.bold : null,
-    lineHeight: settingsState.lineHeight,
+    lineHeight: settingsState.lineHeightForBook(state.lineHeight),
     sectionHeadings: _sectionHeadingsByLine,
     lineHtml: (line) => _lineHtml(
       line,
@@ -3597,7 +3600,7 @@ class _CommentaryCardState extends State<_CommentaryCard> {
               child: CommentaryListBase(
                 key: _commentaryKey,
                 indexes: [widget.index],
-                fontSize: settingsState.commentatorsFontSize,
+                fontSize: commentatorsFontSizeOf(context, settingsState),
                 openBookCallback: widget.openBookCallback,
                 showSearch: false,
                 selectionSyncController: widget.selectionSyncController,
